@@ -1,0 +1,43 @@
+name: Release Asset
+
+# Builds and attaches the HACS asset (eon_next.zip) to a release that was not
+# created by release-please, e.g. one published by hand in the GitHub UI or on
+# a fork.  Releases created by release-please already get the asset from
+# release-please.yml (events raised with GITHUB_TOKEN don't trigger this).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)build eon_next.zip for, e.g. v2.0.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-zip:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check release metadata matches the tag
+        run: |
+          python3 .github/scripts/check_release_metadata.py
+          version="$(python3 -c 'import json; print(json.load(open("custom_components/eon_next/manifest.json"))["version"])')"
+          if [ "v$version" != "$TAG" ]; then
+            echo "manifest.json version $version does not match tag $TAG" >&2
+            exit 1
+          fi
+
+      - name: Build and attach HACS zip asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          scripts/build_hacs_zip.sh "$GITHUB_WORKSPACE/eon_next.zip"
+          gh release upload "$TAG" "$GITHUB_WORKSPACE/eon_next.zip" --clobber
