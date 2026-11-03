@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 This project is a fork of [madmachinations/eon-next-v2](https://github.com/madmachinations/eon-next-v2), maintained by [@monsagri](https://github.com/monsagri).
 
+## [2.0.0](https://github.com/krivachy/eon-next-v2/compare/v1.10.0...v2.0.0) (2026-11-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** email/password login is removed. E.ON Next moved customer login to Auth0 with a CAPTCHA, and its API no longer accepts an email and password (setup failed with "Failed to authenticate with Eon Next" and `Field '...' not defined by type 'ObtainJSONWebTokenInput'`). The integration now signs in with a per-account API key (`sk_live_...`). Existing entries are migrated in place and Home Assistant asks for re-authentication: create a key as described in [API_KEY.md](API_KEY.md) and paste it into the re-auth dialog. Entity IDs and long-term statistics are unchanged.
+* raise the minimum Home Assistant version to 2026.3.0 (Python 3.14).
+
+
+### Features
+
+* **auth:** log in with an E.ON Next API key via `obtainKrakenToken(input: {APIKey})`; the config flow asks for the key only and identifies the entry by E.ON account number instead of email
+* **auth:** re-authentication accepts a new key, or reuses the saved key when the field is left blank; a key for a different account is refused
+* **auth:** config entry version 2 with `async_migrate_entry`; legacy email/password entries start a re-auth flow instead of failing, and the stored email/password are removed once a key is saved
+* **auth:** redact API keys, access tokens, refresh tokens and emails from log output and error messages
+
+
+### Bug Fixes
+
+* **auth:** fall back to the stored API key when E.ON rejects the refresh token (`Invalid data.` or 401/403), so token expiry and restarts need no user action
+* **release:** build `eon_next.zip` without `__pycache__`/`*.pyc`, and add a workflow to attach it to manually published releases
+
+
+### Credits
+
+* API-key authentication is ported from [TobySmithRM/eon-next-v2](https://github.com/TobySmithRM/eon-next-v2) (MIT): `feat(auth)!: replace password login with E.ON API key`, `fix(auth): fall back to the API key when the refresh token is rejected` and `fix(auth): note the existing API key can be reused on re-auth`.
+
 ## [1.10.0](https://github.com/monsagri/eon-next-v2/compare/v1.9.3...v1.10.0) (2026-07-11)
 
 

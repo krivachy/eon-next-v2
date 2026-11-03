@@ -16,11 +16,11 @@ from homeassistant.helpers import entity_registry as er
 from .backfill import EonNextBackfillManager
 from .const import (
     CARDS_URL,
-    CONF_EMAIL,
-    CONF_PASSWORD,
+    CONF_API_KEY,
     CONF_REFRESH_TOKEN,
     CONF_SHOW_CARD,
     CONF_SHOW_PANEL,
+    CONFIG_ENTRY_VERSION,
     DEFAULT_SHOW_CARD,
     DEFAULT_SHOW_PANEL,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
@@ -32,6 +32,7 @@ from .coordinator import EonNextCoordinator
 from .cost_tracker import EonNextCostTrackerManager
 from .eonnext import EonNext, EonNextAuthError
 from .models import EonNextConfigEntry, EonNextRuntimeData
+from .redact import redact_secrets
 from .services import async_register_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -219,8 +220,38 @@ async def _async_migrate_unique_ids(
     await er.async_migrate_entries(hass, entry.entry_id, _migrate)
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: EonNextConfigEntry) -> bool:
+    """Migrate old config entries.
+
+    v1 -> v2: E.ON replaced password login with API keys.  A v1 entry keeps
+    its data (so nothing is lost and entity/statistic ids are untouched) and
+    is only bumped; setup then raises ``ConfigEntryAuthFailed`` for an entry
+    without an API key, which starts a re-auth flow asking for one.  The
+    re-auth flow drops the legacy email/password once a key is saved.
+    """
+    if entry.version > CONFIG_ENTRY_VERSION:
+        # Downgrade from a future version: refuse rather than guess.
+        return False
+
+    if entry.version == 1:
+        _LOGGER.debug("Migrating E.ON Next config entry from version 1 to 2")
+        hass.config_entries.async_update_entry(
+            entry, data=dict(entry.data), version=2
+        )
+
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: EonNextConfigEntry) -> bool:
     """Set up Eon Next from a config entry."""
+    api_key = entry.data.get(CONF_API_KEY)
+    if not api_key:
+        # Pre-2.0 entry (email/password only).  E.ON no longer accepts
+        # password logins, so ask for an API key via re-auth.
+        raise ConfigEntryAuthFailed(
+            "E.ON Next now requires an API key; re-authenticate the integration"
+        )
+
     api = EonNext()
     authenticated = False
 
@@ -234,8 +265,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EonNextConfigEntry) -> b
         )
 
     api.set_token_update_callback(_persist_refresh_token)
-    api.username = entry.data[CONF_EMAIL]
-    api.password = entry.data[CONF_PASSWORD]
+    api.api_key = api_key
 
     # All login, account/meter loading, and manager initialisation is wrapped
     # so that a failure is mapped to the correct HA outcome (re-auth vs retry)
@@ -243,7 +273,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EonNextConfigEntry) -> b
     # or malformed payload escapes as a bare "Error" and leaks a session per
     # setup retry ("Unclosed client session").
     try:
-        # Try stored refresh token first to avoid a redundant password login.
+        # Try the stored refresh token first to avoid a redundant key login.
         stored_refresh_token = entry.data.get(CONF_REFRESH_TOKEN)
         if stored_refresh_token:
             authenticated = await api.login_with_refresh_token(stored_refresh_token)
@@ -251,14 +281,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: EonNextConfigEntry) -> b
                 _LOGGER.debug("Authenticated using stored refresh token")
             else:
                 _LOGGER.debug(
-                    "Stored refresh token expired, falling back to credentials"
+                    "Stored refresh token rejected, falling back to API key"
                 )
 
-        # Fall back to username/password if refresh token was unavailable.
+        # Fall back to the API key if the refresh token was unavailable or
+        # rejected.  A rejected key needs user action (re-auth).
         if not authenticated:
-            authenticated = await api.login_with_username_and_password(
-                entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD]
-            )
+            authenticated = await api.login_with_api_key(api_key)
             if not authenticated:
                 raise ConfigEntryAuthFailed("Failed to authenticate with Eon Next")
 
@@ -286,7 +315,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EonNextConfigEntry) -> b
         # unhandled error, and never leak the session.
         await api.async_close()
         raise ConfigEntryNotReady(
-            f"Error setting up E.ON Next integration: {err}"
+            f"Error setting up E.ON Next integration: {redact_secrets(err)}"
         ) from err
 
     entry.runtime_data = EonNextRuntimeData(

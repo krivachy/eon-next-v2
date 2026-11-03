@@ -18,8 +18,7 @@ import custom_components.eon_next as integration
 from custom_components.eon_next.backfill import EonNextBackfillManager
 from custom_components.eon_next.const import (
     CONF_BACKFILL_ENABLED,
-    CONF_EMAIL,
-    CONF_PASSWORD,
+    CONF_API_KEY,
     CONF_REFRESH_TOKEN,
     CONF_SHOW_CARD,
     CONF_SHOW_PANEL,
@@ -81,10 +80,9 @@ class FakeAccount:
 class FakeApi:
     def __init__(self) -> None:
         self.refresh_login_calls: list[str] = []
-        self.password_login_calls: list[tuple[str, str]] = []
+        self.api_key_login_calls: list[str] = []
         self.closed = False
-        self.username = ""
-        self.password = ""
+        self.api_key: str | None = None
         self.accounts = [FakeAccount(meters=[FakeMeter()])]
         self._token_callback = None
         self._consumption_result: dict[str, Any] | None = None
@@ -96,8 +94,8 @@ class FakeApi:
         self.refresh_login_calls.append(token)
         return True
 
-    async def login_with_username_and_password(self, u: str, p: str) -> bool:
-        self.password_login_calls.append((u, p))
+    async def login_with_api_key(self, api_key: str) -> bool:
+        self.api_key_login_calls.append(api_key)
         return True
 
     async def async_get_consumption(self, *args: Any, **kwargs: Any) -> dict | None:
@@ -123,10 +121,10 @@ def _mock_entry(*, options: dict[str, Any] | None = None) -> MockConfigEntry:
         domain=DOMAIN,
         title="Eon Next",
         data={
-            CONF_EMAIL: "user@example.com",
-            CONF_PASSWORD: "secret",
+            CONF_API_KEY: "sk_live_test",
             CONF_REFRESH_TOKEN: "refresh-token",
         },
+        version=2,
         options=options or {},
     )
 
@@ -993,10 +991,10 @@ class TestReconcileFrontend:
             domain=DOMAIN,
             title="Eon Next B",
             data={
-                CONF_EMAIL: "b@example.com",
-                CONF_PASSWORD: "secret",
+                CONF_API_KEY: "sk_live_b",
                 CONF_REFRESH_TOKEN: "refresh-b",
             },
+            version=2,
             options={CONF_SHOW_PANEL: True},
         )
         await _setup_entry(hass, entry_b)

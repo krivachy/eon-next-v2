@@ -92,8 +92,8 @@ async def test_refresh_token_login_propagates_api_error_and_preserves_auth() -> 
 
 
 @pytest.mark.asyncio
-async def test_password_login_propagates_api_error_and_preserves_auth() -> None:
-    """EonNextApiError during password login should propagate without resetting auth."""
+async def test_api_key_login_propagates_api_error_and_preserves_auth() -> None:
+    """EonNextApiError during API key login should propagate without resetting auth."""
     api = EonNext()
     api.auth = {
         "issued": 1000000000,
@@ -105,7 +105,7 @@ async def test_password_login_propagates_api_error_and_preserves_auth() -> None:
     )
 
     with pytest.raises(EonNextApiError, match="server unavailable"):
-        await api.login_with_username_and_password("a@b.com", "pw", initialise=False)
+        await api.login_with_api_key("sk_live_abc", initialise=False)
 
     # Auth state must NOT have been reset.
     assert api.auth["refresh"]["token"] == "saved-refresh"

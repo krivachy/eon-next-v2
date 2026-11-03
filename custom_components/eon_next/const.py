@@ -1,12 +1,18 @@
 """Constants for the Eon Next integration."""
 
 DOMAIN = "eon_next"
-INTEGRATION_VERSION = "1.10.0"  # x-release-please-version
+INTEGRATION_VERSION = "2.0.0"  # x-release-please-version
+
+# Config entry schema version.  v1 stored email/password; v2 stores an API key.
+CONFIG_ENTRY_VERSION = 2
 
 # Authentication
+CONF_API_KEY = "api_key"
+CONF_REFRESH_TOKEN = "refresh_token"
+# Legacy v1 credentials.  E.ON no longer accepts password logins; these keys
+# are only read to detect pre-2.0 entries and are removed on re-auth.
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
-CONF_REFRESH_TOKEN = "refresh_token"
 
 # Frontend / dashboard
 CONF_SHOW_PANEL = "show_panel"

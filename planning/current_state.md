@@ -12,7 +12,7 @@ The integration currently provides cloud-polled monitoring for EON Next accounts
 - Services exposed: `add_cost_tracker`, `reset_cost_tracker`, `update_cost_tracker`
 - Options flow: panel visibility, card visibility, backfill configuration
 - Default polling interval: 30 minutes
-- Auth: email/password with refresh token persistence
+- Auth: per-account API key (`sk_live_...`, see `API_KEY.md`) with refresh token persistence; a rejected refresh token falls back to the API key. Email/password login was removed in 2.0.0 (E.ON moved login to Auth0).
 
 ## Implemented Setup and Account Handling
 

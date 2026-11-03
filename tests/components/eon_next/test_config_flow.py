@@ -1,4 +1,4 @@
-"""Config-flow tests: first login, duplicate abort, and re-auth.
+"""Config-flow tests: API-key login, duplicate abort, and re-auth.
 
 These cover the most security-sensitive paths (initial login and re-auth),
 which previously had no test coverage (spec 07, finding 7.1).
@@ -21,12 +21,13 @@ from homeassistant.helpers import recorder as recorder_helper
 from homeassistant.setup import async_setup_component
 
 from custom_components.eon_next.const import (
+    CONF_API_KEY,
     CONF_EMAIL,
     CONF_PASSWORD,
     CONF_REFRESH_TOKEN,
     DOMAIN,
 )
-from custom_components.eon_next.eonnext import EonNextApiError
+from custom_components.eon_next.eonnext import EonNextApiError, EonNextAuthError
 
 
 @pytest.fixture(autouse=True)
@@ -57,28 +58,43 @@ def _mock_entry_lifecycle() -> Generator[None, None, None]:
         yield
 
 
+API_KEY = "sk_live_test_key_123"
+ACCOUNT = "A-1234ABCD"
+
+
 class _FakeFlowApi:
-    """Stand-in for EonNext used inside the config flow's credential check."""
+    """Stand-in for EonNext used inside the config flow's key check."""
 
     def __init__(
         self,
         *,
         success: bool = True,
         token: str = "new-refresh-token",
+        accounts: list[str] | None = None,
         raises: Exception | None = None,
+        accounts_raise: Exception | None = None,
     ) -> None:
         self._success = success
         self._raises = raises
+        self._accounts_raise = accounts_raise
+        self._accounts = [ACCOUNT] if accounts is None else accounts
         self.auth: dict[str, Any] = {"refresh": {"token": token}}
+        self.keys_tried: list[str] = []
         self.closed = False
 
-    async def login_with_username_and_password(
-        self, email: str, password: str, initialise: bool = False
+    async def login_with_api_key(
+        self, api_key: str, initialise: bool = False
     ) -> bool:
-        del email, password, initialise
+        del initialise
+        self.keys_tried.append(api_key)
         if self._raises is not None:
             raise self._raises
         return self._success
+
+    async def async_get_account_numbers(self) -> list[str]:
+        if self._accounts_raise is not None:
+            raise self._accounts_raise
+        return self._accounts
 
     async def async_close(self) -> None:
         self.closed = True
@@ -105,123 +121,125 @@ async def _ensure_recorder(hass: HomeAssistant) -> None:
     await hass.data[recorder_helper.DATA_RECORDER].db_connected
 
 
-@pytest.mark.asyncio
-async def test_user_flow_creates_entry(
-    hass: HomeAssistant, enable_custom_integrations: None
-) -> None:
-    """A successful login creates an entry with a lowercased email + token."""
-    del enable_custom_integrations
-    await _ensure_recorder(hass)
-    with _patch_api(_FakeFlowApi(token="rt-1")):
+async def _start_user_flow(hass: HomeAssistant, fake: _FakeFlowApi, key: str):
+    with _patch_api(fake):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": SOURCE_USER}
         )
         assert result["type"] == FlowResultType.FORM
-
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {CONF_EMAIL: "User@Example.com", CONF_PASSWORD: "secret"},
+        assert result["step_id"] == "user"
+        assert list(result["data_schema"].schema) == [CONF_API_KEY]
+        return await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_API_KEY: key}
         )
-
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_EMAIL] == "user@example.com"
-    assert result["data"][CONF_PASSWORD] == "secret"
-    assert result["data"][CONF_REFRESH_TOKEN] == "rt-1"
 
 
 @pytest.mark.asyncio
-async def test_user_flow_invalid_auth(
+async def test_user_flow_creates_entry(
     hass: HomeAssistant, enable_custom_integrations: None
 ) -> None:
-    """Bad credentials keep the form open with an invalid_auth error."""
+    """A valid key creates an entry keyed by account number."""
     del enable_custom_integrations
     await _ensure_recorder(hass)
-    with _patch_api(_FakeFlowApi(success=False)):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {CONF_EMAIL: "user@example.com", CONF_PASSWORD: "wrong"},
-        )
+    fake = _FakeFlowApi(token="rt-1", accounts=["A-2", ACCOUNT])
+    result = await _start_user_flow(hass, fake, f"  {API_KEY} ")
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"] == {CONF_API_KEY: API_KEY, CONF_REFRESH_TOKEN: "rt-1"}
+    assert result["result"].unique_id == "A-1234ABCD"
+    assert result["result"].version == 2
+    assert fake.keys_tried == [API_KEY]
+    assert fake.closed is True
+
+
+@pytest.mark.asyncio
+async def test_user_flow_invalid_key(
+    hass: HomeAssistant, enable_custom_integrations: None
+) -> None:
+    """A rejected key keeps the form open with invalid_auth."""
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    result = await _start_user_flow(hass, _FakeFlowApi(success=False), "sk_live_bad")
 
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_auth"}
 
 
 @pytest.mark.asyncio
-async def test_user_flow_cannot_connect(
+async def test_user_flow_key_rejected_on_account_fetch(
     hass: HomeAssistant, enable_custom_integrations: None
 ) -> None:
-    """A transport error surfaces as cannot_connect, not a crash."""
+    """An auth error fetching accounts is also invalid_auth."""
     del enable_custom_integrations
     await _ensure_recorder(hass)
-    with _patch_api(_FakeFlowApi(raises=EonNextApiError("boom"))):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secret"},
-        )
+    fake = _FakeFlowApi(accounts_raise=EonNextAuthError("nope"))
+    result = await _start_user_flow(hass, fake, API_KEY)
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_auth"}
+
+
+@pytest.mark.asyncio
+async def test_user_flow_no_accounts(
+    hass: HomeAssistant, enable_custom_integrations: None
+) -> None:
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    result = await _start_user_flow(hass, _FakeFlowApi(accounts=[]), API_KEY)
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "no_accounts"}
+
+
+@pytest.mark.asyncio
+async def test_user_flow_cannot_connect(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A transport error surfaces as cannot_connect, and the key is not logged."""
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    fake = _FakeFlowApi(raises=EonNextApiError(f"boom {API_KEY}"))
+    with caplog.at_level(logging.DEBUG, logger="custom_components.eon_next"):
+        result = await _start_user_flow(hass, fake, API_KEY)
 
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {"base": "cannot_connect"}
+    assert API_KEY not in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_user_flow_duplicate_aborts(
     hass: HomeAssistant, enable_custom_integrations: None
 ) -> None:
-    """Re-adding an already-configured email aborts on the unique_id."""
+    """Adding an already-configured account aborts on the unique_id."""
     del enable_custom_integrations
     await _ensure_recorder(hass)
-    existing = MockConfigEntry(
+    MockConfigEntry(
         domain=DOMAIN,
-        unique_id="user@example.com",
-        data={CONF_EMAIL: "user@example.com", CONF_PASSWORD: "x"},
-    )
-    existing.add_to_hass(hass)
+        unique_id=ACCOUNT,
+        version=2,
+        data={CONF_API_KEY: "sk_live_old", CONF_REFRESH_TOKEN: "rt"},
+    ).add_to_hass(hass)
 
-    with _patch_api(_FakeFlowApi()):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": SOURCE_USER}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {CONF_EMAIL: "user@example.com", CONF_PASSWORD: "secret"},
-        )
+    result = await _start_user_flow(hass, _FakeFlowApi(), API_KEY)
 
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "already_configured"
 
 
-@pytest.mark.asyncio
-async def test_reauth_updates_entry(
-    hass: HomeAssistant,
-    enable_custom_integrations: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A successful re-auth updates the entry's password and refresh token."""
-    del enable_custom_integrations
-    await _ensure_recorder(hass)
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        unique_id="user@example.com",
-        data={
-            CONF_EMAIL: "user@example.com",
-            CONF_PASSWORD: "old",
-            CONF_REFRESH_TOKEN: "old-rt",
-        },
-    )
-    entry.add_to_hass(hass)
-
-    # Don't actually reload (which would run full setup) during the test.
+def _no_reload(hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Don't actually reload (which would run full setup) during the test."""
     monkeypatch.setattr(
         hass.config_entries, "async_schedule_reload", lambda *a, **k: None, raising=False
     )
 
-    with _patch_api(_FakeFlowApi(token="fresh-rt")):
+
+async def _run_reauth(
+    hass: HomeAssistant, entry: MockConfigEntry, fake: _FakeFlowApi, user_input: dict
+):
+    with _patch_api(fake):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
             context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id},
@@ -229,56 +247,172 @@ async def test_reauth_updates_entry(
         )
         assert result["type"] == FlowResultType.FORM
         assert result["step_id"] == "reauth_confirm"
-
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {CONF_EMAIL: "user@example.com", CONF_PASSWORD: "newpass"},
+        return await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input
         )
+
+
+def _v2_entry() -> MockConfigEntry:
+    return MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=ACCOUNT,
+        version=2,
+        data={CONF_API_KEY: "sk_live_old", CONF_REFRESH_TOKEN: "old-rt"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_reauth_with_new_key(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    entry = _v2_entry()
+    entry.add_to_hass(hass)
+    _no_reload(hass, monkeypatch)
+
+    fake = _FakeFlowApi(token="fresh-rt")
+    result = await _run_reauth(hass, entry, fake, {CONF_API_KEY: API_KEY})
 
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "reauth_successful"
-    assert entry.data[CONF_PASSWORD] == "newpass"
+    assert fake.keys_tried == [API_KEY]
+    assert entry.data == {CONF_API_KEY: API_KEY, CONF_REFRESH_TOKEN: "fresh-rt"}
+    assert entry.unique_id == ACCOUNT
+
+
+@pytest.mark.asyncio
+async def test_reauth_blank_field_reuses_existing_key(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    entry = _v2_entry()
+    entry.add_to_hass(hass)
+    _no_reload(hass, monkeypatch)
+
+    fake = _FakeFlowApi(token="fresh-rt")
+    result = await _run_reauth(hass, entry, fake, {})
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert fake.keys_tried == ["sk_live_old"]
+    assert entry.data[CONF_API_KEY] == "sk_live_old"
     assert entry.data[CONF_REFRESH_TOKEN] == "fresh-rt"
 
 
+@pytest.mark.asyncio
+async def test_reauth_invalid_key_keeps_form(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    entry = _v2_entry()
+    entry.add_to_hass(hass)
+    _no_reload(hass, monkeypatch)
+
+    result = await _run_reauth(
+        hass, entry, _FakeFlowApi(success=False), {CONF_API_KEY: "sk_live_bad"}
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_auth"}
+    assert entry.data[CONF_API_KEY] == "sk_live_old"
+
+
+@pytest.mark.asyncio
 async def test_reauth_rejects_different_account(
     hass: HomeAssistant,
     enable_custom_integrations: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Re-auth with a different account's email aborts on unique_id mismatch."""
+    """A key for another account aborts instead of rebinding the entry."""
     del enable_custom_integrations
     await _ensure_recorder(hass)
-    entry = MockConfigEntry(
+    entry = _v2_entry()
+    entry.add_to_hass(hass)
+    _no_reload(hass, monkeypatch)
+
+    result = await _run_reauth(
+        hass, entry, _FakeFlowApi(accounts=["B-OTHER"]), {CONF_API_KEY: API_KEY}
+    )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_account_mismatch"
+    assert entry.data[CONF_API_KEY] == "sk_live_old"
+    assert entry.unique_id == ACCOUNT
+
+
+def _legacy_entry() -> MockConfigEntry:
+    return MockConfigEntry(
         domain=DOMAIN,
         unique_id="user@example.com",
+        version=2,  # already migrated: data still holds the v1 credentials
         data={
             CONF_EMAIL: "user@example.com",
             CONF_PASSWORD: "old",
             CONF_REFRESH_TOKEN: "old-rt",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_reauth_legacy_entry_requires_key_and_scrubs_password(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-2.0 entry swaps email/password for a key and re-keys its unique_id."""
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    entry = _legacy_entry()
     entry.add_to_hass(hass)
+    _no_reload(hass, monkeypatch)
 
-    monkeypatch.setattr(
-        hass.config_entries, "async_schedule_reload", lambda *a, **k: None, raising=False
-    )
-
-    with _patch_api(_FakeFlowApi(token="fresh-rt")):
+    fake = _FakeFlowApi(token="fresh-rt")
+    with _patch_api(fake):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
             context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id},
             data=entry.data,
         )
-        assert result["step_id"] == "reauth_confirm"
+        # No stored key: blank input is not accepted by the schema.
+        schema = result["data_schema"].schema
+        assert [str(k) for k in schema] == [CONF_API_KEY]
+        assert next(iter(schema)).__class__.__name__ == "Required"
 
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {CONF_EMAIL: "other@example.com", CONF_PASSWORD: "newpass"},
+            result["flow_id"], {CONF_API_KEY: API_KEY}
         )
 
     assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "reauth_account_mismatch"
-    # Original entry is untouched.
+    assert result["reason"] == "reauth_successful"
+    assert entry.data == {CONF_API_KEY: API_KEY, CONF_REFRESH_TOKEN: "fresh-rt"}
+    assert entry.unique_id == ACCOUNT
+
+
+@pytest.mark.asyncio
+async def test_reauth_legacy_entry_aborts_if_account_already_configured(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    _v2_entry().add_to_hass(hass)
+    entry = _legacy_entry()
+    entry.add_to_hass(hass)
+    _no_reload(hass, monkeypatch)
+
+    result = await _run_reauth(hass, entry, _FakeFlowApi(), {CONF_API_KEY: API_KEY})
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
     assert entry.data[CONF_EMAIL] == "user@example.com"
-    assert entry.data[CONF_PASSWORD] == "old"
+    assert entry.unique_id == "user@example.com"
