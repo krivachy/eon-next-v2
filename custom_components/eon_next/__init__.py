@@ -7,7 +7,7 @@ import logging
 import os
 from typing import Any
 
-from homeassistant.components.http import StaticPathConfig
+from homeassistant.components.http import StaticPathConfig  # pyright: ignore[reportPrivateImportUsage]
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv

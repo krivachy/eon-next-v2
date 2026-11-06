@@ -70,7 +70,7 @@ def async_setup_websocket(hass: HomeAssistant) -> None:
 
 
 @websocket_api.websocket_command(  # pyright: ignore[reportPrivateImportUsage]
-    {vol.Required("type"): "eon_next/version"}
+    {vol.Required("type"): "eon_next/version"}  # pyright: ignore[reportArgumentType]
 )
 @callback
 def ws_version(
@@ -86,7 +86,7 @@ def ws_version(
 
 
 @websocket_api.websocket_command(  # pyright: ignore[reportPrivateImportUsage]
-    {vol.Required("type"): "eon_next/dashboard_summary"}
+    {vol.Required("type"): "eon_next/dashboard_summary"}  # pyright: ignore[reportArgumentType]
 )
 @callback
 def ws_dashboard_summary(
@@ -373,7 +373,7 @@ async def _entries_from_rest(
 
 
 @websocket_api.websocket_command(  # pyright: ignore[reportPrivateImportUsage]
-    {
+    {  # pyright: ignore[reportArgumentType]
         vol.Required("type"): "eon_next/ev_schedule",
         vol.Required("device_id"): str,
     }
@@ -444,7 +444,7 @@ def ws_ev_schedule(
 
 
 @websocket_api.websocket_command(  # pyright: ignore[reportPrivateImportUsage]
-    {vol.Required("type"): "eon_next/backfill_status"}
+    {vol.Required("type"): "eon_next/backfill_status"}  # pyright: ignore[reportArgumentType]
 )
 @callback
 def ws_backfill_status(

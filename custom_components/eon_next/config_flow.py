@@ -159,7 +159,7 @@ class EonNextConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({vol.Required(CONF_API_KEY): _API_KEY_SELECTOR}),
+            data_schema=vol.Schema({vol.Required(CONF_API_KEY): _API_KEY_SELECTOR}),  # pyright: ignore[reportArgumentType]
             errors=errors,
             description_placeholders={"api_key_url": API_KEY_DOCS_URL},
         )
@@ -217,7 +217,7 @@ class EonNextConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema(
+            data_schema=vol.Schema(  # pyright: ignore[reportArgumentType]
                 {
                     (
                         vol.Optional(CONF_API_KEY)
@@ -250,7 +250,7 @@ class EonNextOptionsFlow(config_entries.OptionsFlow):
         options = self.config_entry.options
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
+            data_schema=vol.Schema(  # pyright: ignore[reportArgumentType]
                 {
                     vol.Required(
                         CONF_SHOW_PANEL,
