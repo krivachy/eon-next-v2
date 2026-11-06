@@ -83,8 +83,8 @@ Gas consumption from the REST endpoint (m3 on SMETS2 meters) is converted to kWh
 - Cost data: GraphQL `consumptionDataByMpxn` for standing charge and total cost
 - Tariff data: GraphQL `getAccountAgreements` for active tariff agreements per meter point
 - EV schedules: SmartFlex planned dispatch query (`flexPlannedDispatches`)
-- Historical backfill: configurable, resumable, throttled statistics import
-- External statistics import for Energy Dashboard
+- Historical backfill: configurable, resumable, throttled statistics import (half-hourly with paging, spliced per hour; daily buckets only as a fallback)
+- External statistics import for Energy Dashboard: consumption (`eon_next:<fuel>_<serial>_consumption`, kWh) and cost (`eon_next:<fuel>_<serial>_cost`, GBP: per-half-hour unit rate plus the daily standing charge in the first local hour), live and backfilled
 - Resilience: reuses previous coordinator data on transient update failures
 - Resilience: raises re-auth when auth failure is detected
 

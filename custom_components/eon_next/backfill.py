@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import logging
 from typing import Any, TypedDict
 
@@ -36,11 +36,23 @@ from .eonnext import (
     METER_TYPE_ELECTRIC,
     METER_TYPE_GAS,
 )
-from .statistics import async_import_historical_statistics, statistic_id_for_meter
+from .statistics import (
+    async_import_historical_statistics,
+    cost_statistic_id_for_meter,
+    statistic_id_for_meter,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 _STORE_VERSION = 1
+
+# Half-hourly page size per day of chunk: 50 slots covers the 25-hour
+# clocks-back day.  Capped so a long chunk does not ask for an unbounded page;
+# anything beyond a page is fetched by paging.
+_SLOTS_PER_DAY = 50
+_MAX_PAGE_SIZE = 5000
+_MAX_PAGES = 100
+_HALF_HOUR = timedelta(minutes=30)
 
 
 class MeterBackfillState(TypedDict):
@@ -57,6 +69,11 @@ class BackfillState(TypedDict):
     rebuild_done: bool
     lookback_days: int
     meters: dict[str, MeterBackfillState]
+    # True once progress was (re)seeded for half-hourly backfill.  Backfills
+    # that ran before 2.1.1 fetched daily buckets, which left days partly
+    # covered by the live import partial; those re-run once at half-hourly
+    # resolution.
+    half_hourly: bool
 
 
 class BackfillStatus(TypedDict):
@@ -199,6 +216,7 @@ class EonNextBackfillManager:
             "rebuild_done": bool(loaded.get("rebuild_done", False)) if loaded else False,
             "lookback_days": int(loaded.get("lookback_days", 0)) if loaded else 0,
             "meters": dict(loaded.get("meters", {})) if loaded else {},
+            "half_hourly": bool(loaded.get("half_hourly", False)) if loaded else False,
         }
 
     async def _save_state(self) -> None:
@@ -217,6 +235,93 @@ class EonNextBackfillManager:
                     continue
                 meters.append(meter)
         return meters
+
+    @staticmethod
+    def _utc_iso(value: datetime) -> str:
+        return dt_util.as_utc(value).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _meter_data(self, meter: Any) -> dict[str, Any] | None:
+        """Latest coordinator data (tariff, standing charge) for *meter*.
+
+        ``None`` for export meters and when no tariff is known, so no cost
+        statistic is imported for them.
+        """
+        if getattr(meter, "is_export", False):
+            return None
+        data = getattr(self.coordinator, "data", None)
+        if not isinstance(data, dict):
+            return None
+        meter_data = data.get(meter.serial)
+        if not isinstance(meter_data, dict):
+            return None
+        if meter_data.get("tariff_unit_rate") is None:
+            return None
+        return meter_data
+
+    async def _fetch_half_hourly(
+        self, meter: Any, period_from: datetime, period_to: datetime, day_count: int
+    ) -> list[dict[str, Any]]:
+        """Fetch every half-hourly entry in ``[period_from, period_to)``.
+
+        Requests one page sized for the chunk and, while the endpoint reports
+        a ``next`` page, narrows the window past the entries already returned
+        (whichever order the endpoint sorts them in) and asks again.  Entries
+        are de-duplicated by ``interval_start``.  Raises ``EonNextApiError``
+        on any page failure so the whole chunk is retried.
+        """
+        page_size = min(max(day_count, 1) * _SLOTS_PER_DAY, _MAX_PAGE_SIZE)
+        collected: dict[datetime, dict[str, Any]] = {}
+        window_from, window_to = period_from, period_to
+
+        for _ in range(_MAX_PAGES):
+            result = await self.api.async_get_consumption(
+                meter.type,
+                meter.supply_point_id,
+                meter.serial,
+                group_by="half_hour",
+                page_size=page_size,
+                period_from=self._utc_iso(window_from),
+                period_to=self._utc_iso(window_to),
+            )
+            page = result.get("results") if result else None
+            if not isinstance(page, list) or not page:
+                break
+
+            starts: list[datetime] = []
+            added = 0
+            for entry in page:
+                if not isinstance(entry, dict):
+                    continue
+                parsed = dt_util.parse_datetime(str(entry.get("interval_start", "")))
+                if parsed is None:
+                    continue
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=dt_util.UTC)
+                parsed = dt_util.as_utc(parsed)
+                if not period_from <= parsed < period_to:
+                    continue
+                starts.append(parsed)
+                if parsed not in collected:
+                    collected[parsed] = entry
+                    added += 1
+
+            if not result or not result.get("next") or not starts or not added:
+                break
+            if starts[0] > starts[-1]:
+                # Newest first: the next page is older than this one.
+                window_to = min(starts)
+            else:
+                window_from = max(starts) + _HALF_HOUR
+            if window_from >= window_to:
+                break
+        else:
+            _LOGGER.warning(
+                "Backfill for meter %s stopped paging after %d pages",
+                meter.serial,
+                _MAX_PAGES,
+            )
+
+        return [collected[key] for key in sorted(collected)]
 
     @staticmethod
     def _utc_boundary_iso(day: date) -> str:
@@ -344,6 +449,7 @@ class EonNextBackfillManager:
         if not self._state["initialized"]:
             self._state["initialized"] = True
             self._state["rebuild_done"] = False
+            self._state["half_hourly"] = True
             self._state["lookback_days"] = lookback_days
             self._state["meters"] = {
                 meter.serial: {"next_start": start.isoformat(), "done": False}
@@ -352,6 +458,30 @@ class EonNextBackfillManager:
             await self._save_state()
             _LOGGER.debug(
                 "Initialized historical backfill progress from %s (%d days)",
+                start,
+                lookback_days,
+            )
+            return
+
+        if not self._state.get("half_hourly", False):
+            # Progress from a daily-granularity backfill (before 2.1.1): re-run
+            # the window once at half-hourly resolution so days the live import
+            # only partly covered are filled and cost history is imported.
+            # Statistics are not cleared - each hour is overwritten in place -
+            # unless the window was also extended, which requests a rebuild.
+            if lookback_days > stored_lookback:
+                self._state["rebuild_done"] = False
+            self._state["half_hourly"] = True
+            self._state["lookback_days"] = lookback_days
+            for meter in meters:
+                self._state["meters"][meter.serial] = {
+                    "next_start": start.isoformat(),
+                    "done": False,
+                }
+            await self._save_state()
+            _LOGGER.info(
+                "Re-running historical backfill at half-hourly resolution "
+                "from %s (%d days)",
                 start,
                 lookback_days,
             )
@@ -413,8 +543,10 @@ class EonNextBackfillManager:
 
         statistic_ids = [
             statistic_id
+            for meter in meters
             for statistic_id in (
-                statistic_id_for_meter(meter.serial, meter.type) for meter in meters
+                statistic_id_for_meter(meter.serial, meter.type),
+                cost_statistic_id_for_meter(meter.serial, meter.type),
             )
             if statistic_id is not None
         ]
@@ -497,19 +629,36 @@ class EonNextBackfillManager:
                     continue
 
                 end_date = min(start_date + timedelta(days=chunk_days - 1), yesterday)
-                period_from = self._utc_boundary_iso(start_date)
-                period_to = self._utc_boundary_iso(end_date + timedelta(days=1))
+                window_from = dt_util.as_utc(dt_util.start_of_local_day(start_date))
+                window_to = dt_util.as_utc(
+                    dt_util.start_of_local_day(end_date + timedelta(days=1))
+                )
                 day_count = (end_date - start_date).days + 1
+                daily_granularity = False
                 try:
-                    result = await self.api.async_get_consumption(
-                        meter.type,
-                        meter.supply_point_id,
-                        meter.serial,
-                        group_by="day",
-                        page_size=day_count,
-                        period_from=period_from,
-                        period_to=period_to,
+                    # Half-hourly first: each hour then replaces the stored
+                    # hour, so days the live import only partly covered are
+                    # filled completely.  Daily buckets are only a fallback for
+                    # periods without half-hourly data.
+                    consumption: list[dict[str, Any]] | None = (
+                        await self._fetch_half_hourly(
+                            meter, window_from, window_to, day_count
+                        )
                     )
+                    if not consumption:
+                        result = await self.api.async_get_consumption(
+                            meter.type,
+                            meter.supply_point_id,
+                            meter.serial,
+                            group_by="day",
+                            page_size=day_count,
+                            period_from=self._utc_boundary_iso(start_date),
+                            period_to=self._utc_boundary_iso(
+                                end_date + timedelta(days=1)
+                            ),
+                        )
+                        consumption = result.get("results") if result else None
+                        daily_granularity = True
                 except EonNextApiError as err:
                     # Transport/server error: leave the cursor untouched so this
                     # chunk is retried next cycle instead of leaving a permanent
@@ -524,17 +673,17 @@ class EonNextBackfillManager:
                     requests_remaining -= 1
                     continue
 
-                consumption = result.get("results") if result else None
                 if consumption:
-                    # Backfill fetches daily buckets; flag it so a day the
+                    # Daily fallback buckets are flagged so a day the
                     # coordinator already imported at half-hourly resolution is
-                    # not double-counted when the cursor reaches yesterday.
+                    # not double-counted.
                     await async_import_historical_statistics(
                         self.hass,
                         meter.serial,
                         meter.type,
                         consumption,
-                        daily_granularity=True,
+                        daily_granularity=daily_granularity,
+                        meter_data=self._meter_data(meter),
                     )
 
                 meter_state["next_start"] = (end_date + timedelta(days=1)).isoformat()

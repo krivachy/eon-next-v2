@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 This project is a fork of [madmachinations/eon-next-v2](https://github.com/madmachinations/eon-next-v2), maintained by [@monsagri](https://github.com/monsagri).
 
+## [2.1.1](https://github.com/krivachy/eon-next-v2/compare/v2.1.0...v2.1.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **backfill:** the historical backfill fetches half-hourly data (paging through the consumption endpoint) instead of one daily bucket per day, and writes it hour by hour. Each backfilled hour replaces the stored hour, so days that the live import only partly covered are now filled completely, with no double counting. Previously such days were skipped by the backfill and stayed partial. Daily buckets are still used for periods that have no half-hourly data
+* **backfill:** a backfill that finished on an earlier version runs once more over the configured lookback window at half-hourly resolution, so partial days are repaired and cost history is imported. Existing statistics are not cleared; each hour is overwritten in place. It uses your backfill settings and only runs while the backfill is enabled
+* **statistics:** new external statistic `eon_next:<fuel>_<serial>_cost` (GBP) alongside each meter's consumption statistic, for the Energy Dashboard's *Use an entity tracking the total costs* option. Each half-hour's kWh is priced at its own unit rate (time-of-use aware), and the daily standing charge is added in the first hour of each local day. Both the live import and the historical backfill write it, and *Clear and rebuild statistics before backfill* clears it too. Export meters get no cost statistic. History is priced with the current tariff, so periods before a tariff change use today's rates
+
 ## [2.1.0](https://github.com/krivachy/eon-next-v2/compare/v2.0.0...v2.1.0) (2026-11-06)
 
 

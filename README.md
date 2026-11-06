@@ -99,6 +99,7 @@ When SmartFlex devices are available: smart‑charging schedule status, next cha
 ### Energy Dashboard & statistics
 
 - Current‑price and consumption entities wire directly into Home Assistant's Energy Dashboard.
+- Each meter gets two external statistics: `eon_next:<fuel>_<serial>_consumption` (kWh) and `eon_next:<fuel>_<serial>_cost` (GBP). The cost statistic prices each half‑hour at its own unit rate (time‑of‑use aware) and adds the daily standing charge in the first hour of each local day. To show costs in £, in the Energy Dashboard settings pick the consumption statistic for the grid or gas source, then choose *Use an entity tracking the total costs* and pick the matching `… Cost` statistic. Home Assistant's currency must be GBP for it to be listed. Export meters have no cost statistic.
 - A slow, resumable **historical backfill** imports long‑term statistics (see below).
 - A diagnostic status sensor reports backfill progress.
 
@@ -194,6 +195,8 @@ The integration supports a slow, resumable historical backfill for Energy Dashbo
 - Progress is persisted and resumes across Home Assistant restarts.
 - To force a true full‑history rebuild, enable the option to clear/rebuild existing Eon statistics first.
 - Backfill runs **alongside** live 30‑minute imports rather than suspending them: each historical chunk is spliced into the existing statistics and later cumulative sums are recomputed, so current‑day Energy Dashboard data keeps updating while history fills in.
+- History is fetched half‑hourly and written hour by hour, so a day the live import only partly covered is filled completely. Daily totals are used only for periods with no half‑hourly data.
+- The backfill also imports the cost statistic, priced with the meter's current tariff (periods before a tariff change use today's rates).
 
 Conservative defaults:
 
@@ -207,6 +210,11 @@ Conservative defaults:
 | Delay between requests | `300` seconds |
 
 ## Upgrade notes
+
+### 2.1.1: half‑hourly backfill and cost statistics
+
+- **Partial days are repaired.** Days that the live import only partly covered used to stay partial, because the daily backfill skipped them. The backfill now fetches half‑hourly data and overwrites each hour. If a backfill already finished on an earlier version, it runs once more over your lookback window (with your backfill settings, while the backfill is enabled). Existing statistics are not cleared.
+- **New cost statistic.** `eon_next:<fuel>_<serial>_cost` (GBP) is imported from now on and by the backfill. Add it to the Energy Dashboard as described in [Energy Dashboard & statistics](#energy-dashboard--statistics).
 
 ### 2.1.0: gas consumption in kWh
 
