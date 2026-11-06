@@ -6,11 +6,11 @@ A custom integration that brings your E.ON Next electricity, gas and EV‑chargi
 
 <br clear="left" />
 
-[![Validate with hassfest](https://github.com/monsagri/eon-next-v2/actions/workflows/hassfest.yml/badge.svg)](https://github.com/monsagri/eon-next-v2/actions/workflows/hassfest.yml)
-[![HACS Validate](https://github.com/monsagri/eon-next-v2/actions/workflows/validate.yml/badge.svg)](https://github.com/monsagri/eon-next-v2/actions/workflows/validate.yml)
+[![Validate with hassfest](https://github.com/krivachy/eon-next-v2/actions/workflows/hassfest.yml/badge.svg)](https://github.com/krivachy/eon-next-v2/actions/workflows/hassfest.yml)
+[![HACS Validate](https://github.com/krivachy/eon-next-v2/actions/workflows/validate.yml/badge.svg)](https://github.com/krivachy/eon-next-v2/actions/workflows/validate.yml)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-![downloads](https://img.shields.io/github/downloads/monsagri/eon-next-v2/total.svg)
-![latest downloads](https://img.shields.io/github/downloads/monsagri/eon-next-v2/latest/total.svg)
+![downloads](https://img.shields.io/github/downloads/krivachy/eon-next-v2/total.svg)
+![latest downloads](https://img.shields.io/github/downloads/krivachy/eon-next-v2/latest/total.svg)
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/monsagri)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/monsagri)
@@ -104,9 +104,10 @@ When SmartFlex devices are available: smart‑charging schedule status, next cha
 
 ### Reliability
 
-- Home Assistant re‑auth support for password changes.
+- Signs in with a per‑account E.ON Next **API key** (see [API_KEY.md](API_KEY.md)). Tokens renew from the stored refresh token first; if E.ON rejects it, the integration logs in again with the stored key, so routine token expiry and restarts need no user action.
+- Home Assistant re‑auth support when the API key is regenerated or revoked.
+- API keys, access tokens and refresh tokens are redacted from log output and error messages.
 - Transient connectivity failures during login defer setup instead of invalidating stored credentials.
-- Auth/login GraphQL requests retry once over IPv4 after connector‑level network‑unreachable failures.
 
 ## Lovelace cards
 
@@ -133,12 +134,13 @@ resources:
 
 - Home Assistant `2026.3.0` or newer (which requires Python 3.14).
 - An active E.ON Next account.
+- An E.ON Next **API key** (`sk_live_...`). E.ON no longer accepts email and password logins from integrations. See [Creating an E.ON Next API key](API_KEY.md).
 
 ## Install with HACS (recommended)
 
 The quickest way - click to open this repository directly in your Home Assistant's HACS:
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=monsagri&repository=eon-next-v2&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=krivachy&repository=eon-next-v2&category=integration)
 
 Then click **Download**, restart Home Assistant, and add the integration:
 
@@ -149,22 +151,27 @@ Or add it manually:
 1. Open HACS in Home Assistant.
 2. Go to **Integrations**.
 3. If this repository is not already listed, add it as a custom repository:
-   - URL: `https://github.com/monsagri/eon-next-v2`
+   - URL: `https://github.com/krivachy/eon-next-v2`
    - Category: **Integration**
 4. Find **Eon Next Integration** in HACS and install it.
 5. Restart Home Assistant.
 6. Go to **Settings → Devices & Services → Add Integration**.
-7. Search for **Eon Next** and complete login.
+7. Search for **Eon Next** and paste your API key (see [Creating an E.ON Next API key](API_KEY.md)).
+
+HACS installs this integration from the `eon_next.zip` asset attached to each GitHub release (`hacs.json` sets `zip_release`), not from the default branch. A release without that asset cannot be installed through HACS.
 
 ## Manual installation
 
 1. Copy `custom_components/eon_next` into your Home Assistant `custom_components` directory.
 2. Restart Home Assistant.
-3. Add the integration from **Settings → Devices & Services**.
+3. Add the integration from **Settings → Devices & Services** and enter your API key.
 
 ## Reauthentication
 
-If credentials expire or your password changes, Home Assistant prompts for re‑authentication. Open the integration card and complete the re‑auth flow to restore updates.
+Home Assistant prompts for re‑authentication only when E.ON rejects both the stored refresh token and the stored API key (for example, after the key was regenerated or revoked). Open the integration card and complete the re‑auth flow:
+
+- **Reuse the saved key:** leave the API key field blank (or paste the same key). The key is long‑lived, so this is usually all that's needed.
+- **New key:** paste the new `sk_live_...` key. It must belong to the same E.ON Next account; a key for a different account is refused.
 
 ## Historical backfill (configurable)
 
@@ -188,6 +195,22 @@ Conservative defaults:
 
 ## Upgrade notes
 
+### 2.0.0: API‑key login (breaking)
+
+E.ON Next moved customer login to Auth0 with a CAPTCHA in October 2026, and the API now rejects email/password logins (setup fails with "Failed to authenticate with Eon Next"). From `2.0.0` the integration authenticates with an API key only.
+
+After upgrading:
+
+1. [Create an API key](API_KEY.md) and save it in a password manager. E.ON shows the full key only once; if your account already has a key you no longer have, see [Lost your key?](API_KEY.md#lost-your-key).
+2. After restarting, Home Assistant shows an Eon Next re‑authentication notice under **Settings → Devices & Services**. Select **Re‑authenticate** and paste the key.
+3. The stored email and password are deleted from the config entry when you upgrade, since E.ON no longer accepts them. Once you save a key, the entry's unique ID changes from your email to your E.ON account number and its title shows that number.
+
+Don't remove the old entry and add the integration again: re‑authenticating keeps everything in place, and adding a second entry is refused while the old one is waiting for a key.
+
+Entity IDs, entity unique IDs and long‑term statistics are unchanged; the existing entry is updated in place, so there's no need to remove and re‑add the integration.
+
+### Earlier releases
+
 In `1.2.0`, the `Daily Consumption` sensor state class changed to `total` and now provides a data‑driven `last_reset` for improved Energy Dashboard compatibility. If your instance still has long‑term statistics from older semantics (`measurement` or `total_increasing`), you may need to recreate affected statistics/dashboard cards.
 
 Several sensors had invalid device‑class/state‑class combinations corrected to stop Home Assistant repair issues and spurious long‑term statistics:
@@ -206,6 +229,11 @@ Export meters no longer create the generic `Daily Consumption` and `Current Unit
 Maintainer and release workflow is documented in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 - Contributors use Conventional Commit messages (`feat: …`, `fix: …`) and matching PR titles, because squash merges use PR titles as final commit subjects.
-- Releases use a draft release‑PR flow (`release-please`): merges to `main` prepare release metadata, and maintainers approve/merge the release PR to publish.
+- Releases use a draft release‑PR flow (`release-please`): merges to `main` prepare release metadata, and maintainers approve/merge the release PR to publish. The release workflow then builds `eon_next.zip` (the contents of `custom_components/eon_next/`, without `__pycache__`) and attaches it to the GitHub release for HACS.
+- **Forks:** GitHub disables Actions on new forks. Enable them under **Actions** in the fork (and allow Actions to create pull requests under **Settings → Actions → General → Workflow permissions**), or build and attach the zip by hand. See [DEVELOPMENT.md](DEVELOPMENT.md#hacs-release-asset).
 - The Lit + TypeScript frontend lives in `frontend/` and builds committed bundles into `custom_components/eon_next/frontend/`, so HACS installs need no build step. See [`frontend/AGENTS.md`](frontend/AGENTS.md).
 - Node.js is pinned in `.nvmrc` (`24.13.1`); Python is pinned in `.python-version` (`3.13`).
+
+## Credits
+
+API‑key authentication (the `obtainKrakenToken` API‑key login, the refresh‑token → API‑key fallback, and the key‑creation script in [API_KEY.md](API_KEY.md)) is ported from [TobySmithRM/eon-next-v2](https://github.com/TobySmithRM/eon-next-v2) (MIT).

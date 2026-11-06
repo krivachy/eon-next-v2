@@ -37,8 +37,14 @@ Core outcomes:
 ## Domain-Specific Data Flow
 
 - Authentication:
-  - Primary: email/password login.
+  - Primary: per-account Kraken API key (`sk_live_...`) via
+    `obtainKrakenToken(input: {APIKey})`. Email/password login was removed in
+    2.0.0 (E.ON moved customer login to Auth0 with a CAPTCHA).
   - Session continuity: refresh token persistence in config entry data.
+  - Renewal order: valid access token -> refresh token -> API key. Only a
+    rejected API key requires re-auth (`ConfigEntryAuthFailed`).
+  - Secrets (API key, tokens) go through `redact.py` before any log line or
+    exception message.
 - Consumption fetching order:
   - REST half-hourly first.
   - REST daily second.

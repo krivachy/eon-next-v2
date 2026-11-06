@@ -12,6 +12,7 @@ from typing import Any
 import aiohttp
 
 from .const import API_BASE_URL
+from .redact import redact_secrets, redacted_error_messages
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -113,6 +114,17 @@ query getAccountAgreements($accountNumber: String!) {
 """
 
 
+API_KEY_AUTHENTICATION_MUTATION = """
+mutation apiKeyAuthentication($input: ObtainJSONWebTokenInput!) {
+  obtainKrakenToken(input: $input) {
+    payload
+    refreshExpiresIn
+    refreshToken
+    token
+  }
+}
+"""
+
 # Treat the access token as expired this many seconds before its real
 # expiry, so a token is proactively refreshed rather than sent moments
 # before it lapses (or being rejected under mild server clock skew).
@@ -149,8 +161,10 @@ class EonNext:
     """API client for E.ON Next."""
 
     def __init__(self):
-        self.username = ""
-        self.password = ""
+        # Long-lived per-account Kraken API key (``sk_live_...``).  It is the
+        # only credential E.ON still accepts for programmatic login; tokens
+        # are renewed from the refresh token first and fall back to this key.
+        self.api_key: str | None = None
         self._session: aiohttp.ClientSession | None = None
         self._auth_lock = asyncio.Lock()
         self._on_token_update: Callable[[str], None] | None = None
@@ -255,17 +269,38 @@ class EonNext:
             return False
         return True
 
+    async def __login_with_stored_api_key(self) -> bool:
+        """Log in with the stored API key, if one is configured."""
+        if not self.api_key:
+            _LOGGER.warning(
+                "No E.ON Next API key configured; re-authenticate the "
+                "integration with an API key"
+            )
+            return False
+        return await self.login_with_api_key(initialise=False)
+
+    async def __renew_tokens(self) -> None:
+        """Renew the access token: refresh token first, then the API key.
+
+        Must be called with ``_auth_lock`` held.  A refresh token can look
+        valid locally yet be rejected by E.ON (``Invalid data.`` or a
+        401/403); that falls back to the stored API key instead of
+        escalating to a re-auth prompt.  Transient API errors raise
+        ``EonNextApiError`` rather than returning ``False``, so they
+        propagate and are retried later without a needless re-login.
+        """
+        if self.__refresh_token_is_valid():
+            if await self.__login_with_refresh_token():
+                return
+            _LOGGER.info(
+                "E.ON Next refresh token was rejected; logging in with the API key"
+            )
+        await self.__login_with_stored_api_key()
+
     async def __auth_token(self) -> str:
         async with self._auth_lock:
             if not self.__auth_token_is_valid():
-                if self.__refresh_token_is_valid():
-                    await self.__login_with_refresh_token()
-                else:
-                    await self.login_with_username_and_password(
-                        self.username,
-                        self.password,
-                        initialise=False,
-                    )
+                await self.__renew_tokens()
 
             if not self.__auth_token_is_valid():
                 raise EonNextAuthError("Unable to authenticate")
@@ -279,20 +314,14 @@ class EonNext:
         server (mild clock skew, or expiry between issue and arrival).  This
         invalidates it and refreshes once under the auth lock so a single 401
         is retried transparently rather than escalating to a re-auth prompt.
+        If the refresh token is itself rejected, the stored API key is used.
         Returns ``True`` if a valid token was obtained.
         """
         async with self._auth_lock:
             # Drop the cached access token so the refresh cannot short-circuit.
             self.auth["token"]["token"] = None
             self.auth["token"]["expires"] = None
-            if self.__refresh_token_is_valid():
-                await self.__login_with_refresh_token()
-            else:
-                await self.login_with_username_and_password(
-                    self.username,
-                    self.password,
-                    initialise=False,
-                )
+            await self.__renew_tokens()
             return self.__auth_token_is_valid()
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -341,13 +370,16 @@ class EonNext:
 
                     try:
                         result = await response.json(content_type=None)
-                    except aiohttp.ContentTypeError as err:
+                    except (aiohttp.ContentTypeError, ValueError) as err:
+                        # content_type=None skips aiohttp's content-type check,
+                        # so an HTML/garbage body raises json.JSONDecodeError
+                        # (a ValueError) rather than ContentTypeError.
                         text = await response.text()
                         _LOGGER.debug(
                             "Non-JSON response for %s (status %s): %s",
                             operation,
                             response.status,
-                            text[:500],
+                            redact_secrets(text[:500]),
                         )
                         raise EonNextApiError("Invalid API response") from err
 
@@ -375,36 +407,36 @@ class EonNext:
                         _LOGGER.warning(
                             "GraphQL errors in %s response: %s",
                             operation,
-                            [e.get("message", str(e)) for e in errors if isinstance(e, dict)],
+                            redacted_error_messages(errors),
                         )
 
                     return result
 
             except aiohttp.ClientError as err:
-                _LOGGER.error("GraphQL request failed for %s: %s", operation, err)
-                raise EonNextApiError(f"API request failed: {err}") from err
+                detail = redact_secrets(err)
+                _LOGGER.error("GraphQL request failed for %s: %s", operation, detail)
+                raise EonNextApiError(f"API request failed: {detail}") from err
 
-    async def login_with_username_and_password(
+    async def login_with_api_key(
         self,
-        username: str | None = None,
-        password: str | None = None,
+        api_key: str | None = None,
         initialise: bool = True,
     ) -> bool:
-        if username is not None:
-            self.username = username
-        if password is not None:
-            self.password = password
+        """Obtain a Kraken JWT from a per-account API key (``sk_live_...``).
+
+        Returns ``False`` if E.ON rejects the key.  Transport/API errors raise
+        ``EonNextApiError`` and leave the current auth state untouched.
+        """
+        if api_key is not None:
+            self.api_key = api_key
+        if not self.api_key:
+            return False
 
         try:
             result = await self._graphql_post(
-                "loginEmailAuthentication",
-                "mutation loginEmailAuthentication($input: ObtainJSONWebTokenInput!) {obtainKrakenToken(input: $input) {    payload    refreshExpiresIn    refreshToken    token    __typename}}",
-                {
-                    "input": {
-                        "email": self.username,
-                        "password": self.password,
-                    }
-                },
+                "apiKeyAuthentication",
+                API_KEY_AUTHENTICATION_MUTATION,
+                {"input": {"APIKey": self.api_key}},
                 False,
             )
         except EonNextAuthError:
@@ -420,14 +452,10 @@ class EonNext:
                 await self.__init_accounts()
             return True
 
-        errors = result.get("errors")
-        if isinstance(errors, list):
-            summary: Any = [
-                e.get("message", "error") for e in errors if isinstance(e, dict)
-            ] or "Unknown error"
-        else:
-            summary = "Unknown error"
-        _LOGGER.error("Authentication failed: %s", summary)
+        _LOGGER.error(
+            "E.ON Next API key authentication failed: %s",
+            redacted_error_messages(result.get("errors")),
+        )
         self.__reset_authentication()
         return False
 
@@ -456,7 +484,10 @@ class EonNext:
         except EonNextApiError as err:
             # API/transient error - don't destroy the refresh token so it
             # can be retried once the API recovers.
-            _LOGGER.debug("API error during token refresh, will retry later: %s", err)
+            _LOGGER.debug(
+                "API error during token refresh, will retry later: %s",
+                redact_secrets(err),
+            )
             raise
 
         if self._json_contains_key_chain(result, ["data", "obtainKrakenToken", "token"]):
@@ -504,6 +535,14 @@ class EonNext:
             await account._load_meters()
             await account._load_ev_chargers()
             self.accounts.append(account)
+
+    async def async_get_account_numbers(self) -> list[str]:
+        """Return the account numbers visible to the authenticated user."""
+        return [
+            str(info["number"])
+            for info in await self.__get_account_info()
+            if info.get("number")
+        ]
 
     async def async_get_account_balances(self) -> dict[str, Any]:
         """Return latest account balances keyed by account number."""
@@ -578,9 +617,12 @@ class EonNext:
                         f"REST consumption endpoint returned status {response.status}"
                     )
             except aiohttp.ClientError as err:
-                _LOGGER.debug("REST consumption request failed for %s: %s", serial, err)
+                detail = redact_secrets(err)
+                _LOGGER.debug(
+                    "REST consumption request failed for %s: %s", serial, detail
+                )
                 raise EonNextApiError(
-                    f"REST consumption request failed for {serial}: {err}"
+                    f"REST consumption request failed for {serial}: {detail}"
                 ) from err
 
     async def async_get_smart_charging_schedule(

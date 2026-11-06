@@ -16,8 +16,7 @@ import custom_components.eon_next as integration
 from custom_components.eon_next.backfill import EonNextBackfillManager
 from custom_components.eon_next.const import (
     CONF_BACKFILL_ENABLED,
-    CONF_EMAIL,
-    CONF_PASSWORD,
+    CONF_API_KEY,
     CONF_REFRESH_TOKEN,
     DOMAIN,
 )
@@ -73,15 +72,14 @@ class FakeApi:
         self,
         *,
         refresh_login_result: bool,
-        password_login_result: bool = True,
+        api_key_login_result: bool = True,
     ) -> None:
         self.refresh_login_result = refresh_login_result
-        self.password_login_result = password_login_result
+        self.api_key_login_result = api_key_login_result
         self.refresh_login_calls: list[str] = []
-        self.password_login_calls: list[tuple[str, str]] = []
+        self.api_key_login_calls: list[str] = []
         self.closed = False
-        self.username = ""
-        self.password = ""
+        self.api_key: str | None = None
         self.accounts = [FakeAccount(meters=[FakeMeter()])]
         self._token_callback = None
 
@@ -94,14 +92,10 @@ class FakeApi:
         self.refresh_login_calls.append(token)
         return self.refresh_login_result
 
-    async def login_with_username_and_password(
-        self,
-        username: str,
-        password: str,
-    ) -> bool:
-        """Record username/password login fallback usage."""
-        self.password_login_calls.append((username, password))
-        return self.password_login_result
+    async def login_with_api_key(self, api_key: str) -> bool:
+        """Record API key login fallback usage."""
+        self.api_key_login_calls.append(api_key)
+        return self.api_key_login_result
 
     async def async_close(self) -> None:
         """Track API close on unload."""
@@ -123,10 +117,10 @@ def _mock_entry(*, options: dict[str, Any] | None = None) -> MockConfigEntry:
         domain=DOMAIN,
         title="Eon Next",
         data={
-            CONF_EMAIL: "user@example.com",
-            CONF_PASSWORD: "secret",
+            CONF_API_KEY: "sk_live_test",
             CONF_REFRESH_TOKEN: "refresh-token",
         },
+        version=2,
         options=options or {},
     )
 
@@ -202,7 +196,7 @@ async def test_setup_uses_refresh_token_and_creates_status_sensor(
     await _setup_entry(hass, entry)
 
     assert fake_api.refresh_login_calls == ["refresh-token"]
-    assert fake_api.password_login_calls == []
+    assert fake_api.api_key_login_calls == []
     assert entry.runtime_data.api is fake_api
 
     state = hass.states.get(_status_entity_id(hass, entry))
@@ -213,12 +207,12 @@ async def test_setup_uses_refresh_token_and_creates_status_sensor(
 
 
 @pytest.mark.asyncio
-async def test_setup_falls_back_to_username_password_when_refresh_fails(
+async def test_setup_falls_back_to_api_key_when_refresh_fails(
     hass: HomeAssistant,
     enable_custom_integrations: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Setup should fall back to username/password when refresh token is invalid."""
+    """Setup should fall back to the API key when the refresh token is invalid."""
     del enable_custom_integrations
     fake_api = FakeApi(refresh_login_result=False)
     _patch_integration(monkeypatch, fake_api)
@@ -227,7 +221,7 @@ async def test_setup_falls_back_to_username_password_when_refresh_fails(
     await _setup_entry(hass, entry)
 
     assert fake_api.refresh_login_calls == ["refresh-token"]
-    assert fake_api.password_login_calls == [("user@example.com", "secret")]
+    assert fake_api.api_key_login_calls == ["sk_live_test"]
 
 
 @pytest.mark.asyncio
@@ -465,11 +459,11 @@ class FakeApiWithApiError(FakeApi):
         self,
         *,
         refresh_raises: bool = False,
-        password_raises: bool = False,
+        api_key_raises: bool = False,
     ) -> None:
         super().__init__(refresh_login_result=False)
         self._refresh_raises = refresh_raises
-        self._password_raises = password_raises
+        self._api_key_raises = api_key_raises
 
     async def login_with_refresh_token(self, token: str) -> bool:
         self.refresh_login_calls.append(token)
@@ -477,15 +471,11 @@ class FakeApiWithApiError(FakeApi):
             raise EonNextApiError("API unreachable")
         return self.refresh_login_result
 
-    async def login_with_username_and_password(
-        self,
-        username: str,
-        password: str,
-    ) -> bool:
-        self.password_login_calls.append((username, password))
-        if self._password_raises:
+    async def login_with_api_key(self, api_key: str) -> bool:
+        self.api_key_login_calls.append(api_key)
+        if self._api_key_raises:
             raise EonNextApiError("API unreachable")
-        return self.password_login_result
+        return self.api_key_login_result
 
 
 @pytest.mark.asyncio
@@ -508,19 +498,19 @@ async def test_setup_raises_config_entry_not_ready_on_refresh_api_error(
     assert entry.state is ConfigEntryState.SETUP_RETRY
     assert fake_api.closed is True
     assert fake_api.refresh_login_calls == ["refresh-token"]
-    # Password fallback should NOT have been attempted.
-    assert fake_api.password_login_calls == []
+    # API key fallback should NOT have been attempted.
+    assert fake_api.api_key_login_calls == []
 
 
 @pytest.mark.asyncio
-async def test_setup_raises_config_entry_not_ready_on_password_api_error(
+async def test_setup_raises_config_entry_not_ready_on_api_key_api_error(
     hass: HomeAssistant,
     enable_custom_integrations: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """EonNextApiError during password login should result in ConfigEntryNotReady."""
+    """EonNextApiError during API key login should result in ConfigEntryNotReady."""
     del enable_custom_integrations
-    fake_api = FakeApiWithApiError(refresh_raises=False, password_raises=True)
+    fake_api = FakeApiWithApiError(refresh_raises=False, api_key_raises=True)
     _patch_integration(monkeypatch, fake_api)
     entry = _mock_entry()
 
@@ -531,9 +521,9 @@ async def test_setup_raises_config_entry_not_ready_on_password_api_error(
 
     assert entry.state is ConfigEntryState.SETUP_RETRY
     assert fake_api.closed is True
-    # Refresh token login returned False, so password fallback was attempted.
+    # Refresh token login returned False, so the API key fallback was attempted.
     assert fake_api.refresh_login_calls == ["refresh-token"]
-    assert fake_api.password_login_calls == [("user@example.com", "secret")]
+    assert fake_api.api_key_login_calls == ["sk_live_test"]
 
 
 class FakeApiWithAuthError(FakeApi):
@@ -543,11 +533,11 @@ class FakeApiWithAuthError(FakeApi):
         self,
         *,
         refresh_raises: bool = False,
-        password_raises: bool = False,
+        api_key_raises: bool = False,
     ) -> None:
-        super().__init__(refresh_login_result=False, password_login_result=False)
+        super().__init__(refresh_login_result=False, api_key_login_result=False)
         self._refresh_raises = refresh_raises
-        self._password_raises = password_raises
+        self._api_key_raises = api_key_raises
 
     async def login_with_refresh_token(self, token: str) -> bool:
         self.refresh_login_calls.append(token)
@@ -555,15 +545,11 @@ class FakeApiWithAuthError(FakeApi):
             raise EonNextAuthError("token rejected")
         return self.refresh_login_result
 
-    async def login_with_username_and_password(
-        self,
-        username: str,
-        password: str,
-    ) -> bool:
-        self.password_login_calls.append((username, password))
-        if self._password_raises:
-            raise EonNextAuthError("credentials rejected")
-        return self.password_login_result
+    async def login_with_api_key(self, api_key: str) -> bool:
+        self.api_key_login_calls.append(api_key)
+        if self._api_key_raises:
+            raise EonNextAuthError("API key rejected")
+        return self.api_key_login_result
 
 
 @pytest.mark.asyncio
@@ -574,7 +560,7 @@ async def test_setup_maps_auth_error_to_config_entry_auth_failed(
 ) -> None:
     """An EonNextAuthError during setup should trigger re-auth, not a bare error."""
     del enable_custom_integrations
-    fake_api = FakeApiWithAuthError(password_raises=True)
+    fake_api = FakeApiWithAuthError(api_key_raises=True)
     _patch_integration(monkeypatch, fake_api)
     entry = _mock_entry()
 
@@ -589,14 +575,14 @@ async def test_setup_maps_auth_error_to_config_entry_auth_failed(
 
 
 @pytest.mark.asyncio
-async def test_setup_auth_failed_when_password_login_returns_false(
+async def test_setup_auth_failed_when_api_key_login_returns_false(
     hass: HomeAssistant,
     enable_custom_integrations: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both logins failing (no exception) is an auth failure, not a retry."""
     del enable_custom_integrations
-    fake_api = FakeApi(refresh_login_result=False, password_login_result=False)
+    fake_api = FakeApi(refresh_login_result=False, api_key_login_result=False)
     _patch_integration(monkeypatch, fake_api)
     entry = _mock_entry()
 
@@ -607,3 +593,148 @@ async def test_setup_auth_failed_when_password_login_returns_false(
 
     assert entry.state is ConfigEntryState.SETUP_ERROR
     assert fake_api.closed is True
+
+
+# --- v1 (email/password) -> v2 (API key) migration ---
+
+
+@pytest.mark.asyncio
+async def test_v1_password_entry_migrates_and_requests_reauth(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A v1 email/password entry is kept, bumped to v2 and sent to re-auth."""
+    del enable_custom_integrations
+    fake_api = FakeApi(refresh_login_result=True)
+    _patch_integration(monkeypatch, fake_api)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Eon Next",
+        unique_id="user@example.com",
+        version=1,
+        data={
+            "email": "user@example.com",
+            "password": "secret-password",
+            CONF_REFRESH_TOKEN: "refresh-token",
+        },
+    )
+    await _ensure_recorder(hass)
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    entity = registry.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        "electric-meter-1__daily_consumption",
+        config_entry=entry,
+    )
+    with caplog.at_level(logging.DEBUG, logger="custom_components.eon_next"):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.version == 2
+    # Not deleted and not crashed: waiting for the user to supply a key.
+    assert hass.config_entries.async_get_entry(entry.entry_id) is entry
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert [f["context"]["source"] for f in flows] == ["reauth"]
+    # No login is attempted with credentials E.ON no longer accepts.
+    assert fake_api.refresh_login_calls == []
+    assert fake_api.api_key_login_calls == []
+    # The unusable email/password are dropped; the refresh token and the
+    # legacy unique_id (which marks the entry as pre-2.0) are kept.
+    assert entry.data == {CONF_REFRESH_TOKEN: "refresh-token"}
+    assert entry.unique_id == "user@example.com"
+    # Entity ids are untouched.
+    assert registry.async_get(entity.entity_id) is not None
+    assert registry.async_get(entity.entity_id).unique_id == (
+        "electric-meter-1__daily_consumption"
+    )
+    assert "secret-password" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_migration_refuses_future_version(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del enable_custom_integrations
+    fake_api = FakeApi(refresh_login_result=True)
+    _patch_integration(monkeypatch, fake_api)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=3,
+        data={CONF_API_KEY: "sk_live_test", CONF_REFRESH_TOKEN: "rt"},
+    )
+
+    await _ensure_recorder(hass)
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.MIGRATION_ERROR
+
+
+@pytest.mark.asyncio
+async def test_setup_logs_no_secrets_at_debug(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    del enable_custom_integrations
+    fake_api = FakeApi(refresh_login_result=False)
+    _patch_integration(monkeypatch, fake_api)
+    entry = _mock_entry()
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.eon_next"):
+        await _setup_entry(hass, entry)
+
+    assert fake_api.api_key_login_calls == ["sk_live_test"]
+    assert "sk_live_test" not in caplog.text
+    assert "refresh-token" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_listener_reloads_when_reauth_stores_new_credentials(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-auth on a loaded entry is applied by the update listener.
+
+    The client persisting its own rotated token must not reload; a key or
+    refresh token from a separate (re-auth) login must.
+    """
+    del enable_custom_integrations
+    fake_api = FakeApi(refresh_login_result=True)
+    fake_api.auth = {"refresh": {"token": "refresh-token"}}  # type: ignore[attr-defined]
+    _patch_integration(monkeypatch, fake_api)
+    entry = _mock_entry()
+    await _setup_entry(hass, entry)
+
+    with patch.object(hass.config_entries, "async_reload", new=AsyncMock()) as reload:
+        # Client rotates and persists its own token: no reload.
+        fake_api.auth["refresh"]["token"] = "rotated"  # type: ignore[attr-defined]
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_REFRESH_TOKEN: "rotated"}
+        )
+        await hass.async_block_till_done()
+        reload.assert_not_called()
+
+        # Re-auth with the same key stores a token from a separate login.
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_REFRESH_TOKEN: "from-reauth"}
+        )
+        await hass.async_block_till_done()
+        assert reload.await_count == 1
+
+        # Re-auth with a new key.
+        fake_api.auth["refresh"]["token"] = "from-reauth"  # type: ignore[attr-defined]
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_API_KEY: "sk_live_new"}
+        )
+        await hass.async_block_till_done()
+        assert reload.await_count == 2

@@ -1,30 +1,37 @@
 {
     "config": {
         "abort": {
+            "already_configured": "This E.ON Next account is already configured.",
             "reauth_successful": "Re-authentication was successful",
-            "reauth_account_mismatch": "The credentials belong to a different E.ON Next account. Re-authenticate with the original account."
+            "reauth_account_mismatch": "The API key belongs to a different E.ON Next account. Re-authenticate with a key for the original account.",
+            "legacy_entry_needs_reauth": "An E.ON Next entry from before version 2.0 is waiting to be re-authenticated. Open it under Settings > Devices & services and select Re-authenticate to add your API key, instead of adding the integration again."
         },
         "error": {
             "cannot_connect": "Unable to connect to E.ON Next API",
-            "invalid_auth": "Authentication failed",
+            "invalid_auth": "E.ON Next rejected the API key. Check it was copied in full (it starts with sk_live_).",
+            "no_accounts": "The API key is valid, but no E.ON Next accounts are linked to it.",
             "unknown": "An unexpected error occurred"
         },
         "step": {
             "reauth_confirm": {
                 "data": {
-                    "email": "Email address",
-                    "password": "Password"
+                    "api_key": "API key"
                 },
-                "description": "Your login is no longer valid. Re-enter your credentials to reconnect.",
+                "data_description": {
+                    "api_key": "Your E.ON Next API key (sk_live_...)."
+                },
+                "description": "Your E.ON Next login is no longer valid. Entries set up before version 2.0 used an email and password, which E.ON no longer accepts: enter an API key. Otherwise you can leave the field blank to reuse the API key already saved, or paste a new one if it was regenerated or revoked. See [how to create an API key]({api_key_url}).",
                 "title": "Reauthenticate Eon Next"
             },
             "user": {
                 "data": {
-                    "email": "Email address",
-                    "password": "Password"
+                    "api_key": "API key"
                 },
-                "description": "Login to your Eon Next account.",
-                "title": "Login"
+                "data_description": {
+                    "api_key": "Your E.ON Next API key (sk_live_...). It gives full access to your account: keep it private."
+                },
+                "description": "E.ON Next no longer accepts email and password logins for integrations. Sign in with your account's API key instead. See [how to create an API key]({api_key_url}).",
+                "title": "Connect E.ON Next"
             }
         }
     },

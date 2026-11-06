@@ -16,7 +16,7 @@ jobs:
     steps:
       - name: Run release-please
         id: release
-        uses: google-github-actions/release-please-action@v4
+        uses: googleapis/release-please-action@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
@@ -36,6 +36,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.release.outputs.tag_name }}
         run: |
-          cd custom_components/eon_next
-          zip -r "$GITHUB_WORKSPACE/eon_next.zip" .
+          scripts/build_hacs_zip.sh "$GITHUB_WORKSPACE/eon_next.zip"
           gh release upload "$TAG" "$GITHUB_WORKSPACE/eon_next.zip" --clobber

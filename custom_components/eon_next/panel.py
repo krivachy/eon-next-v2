@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 
-from homeassistant.components.http import StaticPathConfig
+from homeassistant.components.http import StaticPathConfig  # pyright: ignore[reportPrivateImportUsage]
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN, PANEL_ICON, PANEL_TITLE, PANEL_URL

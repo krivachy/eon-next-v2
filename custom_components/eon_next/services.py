@@ -182,7 +182,7 @@ async def async_register_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_ADD_COST_TRACKER,
         _async_add_cost_tracker,
-        schema=vol.Schema(
+        schema=vol.Schema(  # pyright: ignore[reportArgumentType]
             {
                 vol.Required("name"): cv.string,
                 vol.Required("tracked_entity_id"): cv.entity_id,
