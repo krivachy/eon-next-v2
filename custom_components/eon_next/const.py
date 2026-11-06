@@ -1,7 +1,7 @@
 """Constants for the Eon Next integration."""
 
 DOMAIN = "eon_next"
-INTEGRATION_VERSION = "2.0.0"  # x-release-please-version
+INTEGRATION_VERSION = "2.1.0"  # x-release-please-version
 
 # Config entry schema version.  v1 stored email/password; v2 stores an API key.
 CONFIG_ENTRY_VERSION = 2
