@@ -8,7 +8,7 @@ Purpose: Document API-supported capabilities and what they enable us to build.
 
 | Endpoint | Type | What It Enables |
 |---|---|---|
-| `obtainKrakenToken` | GraphQL Mutation | Email/password authentication with JWT + refresh token |
+| `obtainKrakenToken` | GraphQL Mutation | API-key (`APIKey`) or refresh-token authentication returning JWT + refresh token (email/password no longer accepted) |
 | `headerGetLoggedInUser` | GraphQL Query | Account discovery and top-level balance visibility |
 | `getAccountMeterSelector` | GraphQL Query | Meter point discovery (MPAN/MPRN), serials, meter metadata |
 | `meterReadingsHistoryTableElectricityReadings` | GraphQL Query | Electricity meter reading history |

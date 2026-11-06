@@ -642,8 +642,11 @@ async def test_v1_password_entry_migrates_and_requests_reauth(
     # No login is attempted with credentials E.ON no longer accepts.
     assert fake_api.refresh_login_calls == []
     assert fake_api.api_key_login_calls == []
-    # Data is preserved until a key is saved; entity ids are untouched.
-    assert entry.data["email"] == "user@example.com"
+    # The unusable email/password are dropped; the refresh token and the
+    # legacy unique_id (which marks the entry as pre-2.0) are kept.
+    assert entry.data == {CONF_REFRESH_TOKEN: "refresh-token"}
+    assert entry.unique_id == "user@example.com"
+    # Entity ids are untouched.
     assert registry.async_get(entity.entity_id) is not None
     assert registry.async_get(entity.entity_id).unique_id == (
         "electric-meter-1__daily_consumption"
@@ -692,3 +695,46 @@ async def test_setup_logs_no_secrets_at_debug(
     assert fake_api.api_key_login_calls == ["sk_live_test"]
     assert "sk_live_test" not in caplog.text
     assert "refresh-token" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_listener_reloads_when_reauth_stores_new_credentials(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-auth on a loaded entry is applied by the update listener.
+
+    The client persisting its own rotated token must not reload; a key or
+    refresh token from a separate (re-auth) login must.
+    """
+    del enable_custom_integrations
+    fake_api = FakeApi(refresh_login_result=True)
+    fake_api.auth = {"refresh": {"token": "refresh-token"}}  # type: ignore[attr-defined]
+    _patch_integration(monkeypatch, fake_api)
+    entry = _mock_entry()
+    await _setup_entry(hass, entry)
+
+    with patch.object(hass.config_entries, "async_reload", new=AsyncMock()) as reload:
+        # Client rotates and persists its own token: no reload.
+        fake_api.auth["refresh"]["token"] = "rotated"  # type: ignore[attr-defined]
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_REFRESH_TOKEN: "rotated"}
+        )
+        await hass.async_block_till_done()
+        reload.assert_not_called()
+
+        # Re-auth with the same key stores a token from a separate login.
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_REFRESH_TOKEN: "from-reauth"}
+        )
+        await hass.async_block_till_done()
+        assert reload.await_count == 1
+
+        # Re-auth with a new key.
+        fake_api.auth["refresh"]["token"] = "from-reauth"  # type: ignore[attr-defined]
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_API_KEY: "sk_live_new"}
+        )
+        await hass.async_block_till_done()
+        assert reload.await_count == 2

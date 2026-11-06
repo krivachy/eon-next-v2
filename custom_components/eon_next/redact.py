@@ -11,8 +11,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Config-entry / payload keys whose values must never be shown.  Suitable for
-# ``homeassistant.components.diagnostics.async_redact_data``.
+# Config-entry / payload keys whose values must never be shown.  Pass this to
+# ``homeassistant.components.diagnostics.async_redact_data`` if a diagnostics
+# platform is ever added.
 TO_REDACT: frozenset[str] = frozenset(
     {
         "api_key",
@@ -24,14 +25,17 @@ TO_REDACT: frozenset[str] = frozenset(
         "token",
         "authorization",
         "Authorization",
+        "liveSecretKey",
     }
 )
 
 REDACTED = "**REDACTED**"
 
 # ``key: value`` / ``key=value`` / ``"key": "value"`` pairs for secret-ish keys.
+# The key may carry a prefix (``access_token``, ``x-api-key``,
+# ``liveSecretKey``), so match word characters/hyphens before the secret word.
 _KEY_VALUE_RE = re.compile(
-    r"""(?P<key>['"]?\b(?:api_?key|refresh_?token|token|password|secret|authorization)\b['"]?\s*[:=]\s*)"""
+    r"""(?P<key>['"]?\b[\w-]*?(?:api[_-]?key|token|password|secret[\w-]*|authorization)['"]?\s*[:=]\s*)"""
     r"""(?P<val>'[^']*'|"[^"]*"|(?:JWT|Bearer)\s+[^\s,;}\]'"]+|[^\s,;}\]'"]+)""",
     re.IGNORECASE,
 )
@@ -42,7 +46,7 @@ _VALUE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # JWTs (access tokens).
     (re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*"), REDACTED),
     # Authorization header values.
-    (re.compile(r"\b(?:JWT|Bearer)\s+[A-Za-z0-9_\-.]{8,}"), REDACTED),
+    (re.compile(r"\b(?:JWT|Bearer)\s+[A-Za-z0-9_\-.]{4,}"), REDACTED),
     # Email addresses (personal data; the old login identifier).
     (re.compile(r"[\w.+\-]+@[\w\-]+(?:\.[\w\-]+)+"), REDACTED),
 )

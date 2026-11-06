@@ -370,7 +370,10 @@ class EonNext:
 
                     try:
                         result = await response.json(content_type=None)
-                    except aiohttp.ContentTypeError as err:
+                    except (aiohttp.ContentTypeError, ValueError) as err:
+                        # content_type=None skips aiohttp's content-type check,
+                        # so an HTML/garbage body raises json.JSONDecodeError
+                        # (a ValueError) rather than ContentTypeError.
                         text = await response.text()
                         _LOGGER.debug(
                             "Non-JSON response for %s (status %s): %s",

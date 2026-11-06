@@ -260,6 +260,10 @@ async def test_account_numbers() -> None:
         f"authorization: JWT {JWT}",
         f"Bearer {JWT}",
         f"jwt {JWT} expired",
+        "access_token=opaque-token-value",
+        "x-api-key: opaque-token-value",
+        "secret_key=opaque-refresh-value",
+        "liveSecretKey: 'opaque-token-value'",
     ],
 )
 def test_redact_secrets_masks_keys_and_tokens(raw: str) -> None:
@@ -327,3 +331,36 @@ async def test_graphql_error_logs_are_redacted(
 
     assert API_KEY not in caplog.text
     assert "sk_live_" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_non_json_graphql_body_is_api_error() -> None:
+    """An HTML error page must raise EonNextApiError, not a raw ValueError."""
+    import json as _json
+
+    class _Resp:
+        status = 502
+
+        async def __aenter__(self) -> "_Resp":
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+        async def json(self, *_a: Any, **_k: Any) -> Any:
+            raise _json.JSONDecodeError("Expecting value", "<html>", 0)
+
+        async def text(self) -> str:
+            return "<html>Bad gateway</html>"
+
+    class _Session:
+        closed = False
+
+        def post(self, *_a: Any, **_k: Any) -> _Resp:
+            return _Resp()
+
+    api = EonNext()
+    api._get_session = AsyncMock(return_value=_Session())  # type: ignore[method-assign]
+
+    with pytest.raises(EonNextApiError):
+        await api.login_with_api_key(API_KEY, initialise=False)

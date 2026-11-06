@@ -11,7 +11,7 @@ Scope: API paths and methods used by this integration, plus live curl verificati
 
 ## Authentication Contract
 
-- GraphQL login mutation (`loginEmailAuthentication`) returns JWT + refresh token.
+- GraphQL login mutation (`apiKeyAuthentication`: `obtainKrakenToken(input: {APIKey})`) returns JWT + refresh token. The email/password `loginEmailAuthentication` login stopped working when E.ON moved customer login to Auth0 (October 2026) and was removed in 2.0.0.
 - GraphQL refresh mutation (`refreshToken`) exchanges refresh token for new JWT + refresh token.
 - Authenticated GraphQL operations require header `authorization: JWT <token>`.
 - REST consumption operations require header `Authorization: JWT <token>`.
@@ -22,7 +22,7 @@ Scope: API paths and methods used by this integration, plus live curl verificati
 
 | Operation Name                                 | Method              | Auth | Purpose                                |
 | ---------------------------------------------- | ------------------- | ---- | -------------------------------------- |
-| `loginEmailAuthentication`                     | `POST /v1/graphql/` | no   | Email/password login                   |
+| `apiKeyAuthentication`                         | `POST /v1/graphql/` | no   | API-key login (`sk_live_...`)          |
 | `refreshToken`                                 | `POST /v1/graphql/` | no   | Refresh JWT                            |
 | `headerGetLoggedInUser`                        | `POST /v1/graphql/` | yes  | Discover account numbers               |
 | `getAccountMeterSelector`                      | `POST /v1/graphql/` | yes  | Discover meters and MPAN/MPRN          |
@@ -46,7 +46,7 @@ Scope: API paths and methods used by this integration, plus live curl verificati
 ## Recommended Verification Command Set
 
 1. Transport: `curl -4/-6` against `/v1/graphql/`.
-2. Login: `loginEmailAuthentication`.
+2. Login: `refreshToken` with the stored refresh token, falling back to `apiKeyAuthentication`.
 3. JWT auth: `headerGetLoggedInUser` with returned JWT.
 4. Refresh: `refreshToken` with returned refresh token.
 5. Consumption: REST electricity/gas route with valid JWT and real meter identifiers.

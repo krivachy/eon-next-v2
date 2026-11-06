@@ -17,6 +17,8 @@ from .backfill import EonNextBackfillManager
 from .const import (
     CARDS_URL,
     CONF_API_KEY,
+    CONF_EMAIL,
+    CONF_PASSWORD,
     CONF_REFRESH_TOKEN,
     CONF_SHOW_CARD,
     CONF_SHOW_PANEL,
@@ -188,15 +190,34 @@ async def _async_update_listener(
     The update listener fires on *any* ``async_update_entry`` call,
     including data-only updates such as persisting a rotated refresh
     token. Reloading on those tears down the aiohttp session mid-request
-    and flaps entities, so only reload when the options actually changed.
+    and flaps entities, so only reload when the options changed or the
+    stored credentials no longer match the running client (a re-auth
+    saved a new API key or refresh token).
     """
     runtime_data = getattr(entry, "runtime_data", None)
     new_options = dict(entry.options)
     if runtime_data is not None:
-        if runtime_data.options == new_options:
+        options_changed = runtime_data.options != new_options
+        if not options_changed and not _credentials_changed(entry, runtime_data.api):
             return
         runtime_data.options = new_options
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+def _credentials_changed(entry: EonNextConfigEntry, api: Any) -> bool:
+    """Return True if entry data holds credentials the client isn't using.
+
+    The client persists its own rotated refresh token, which matches what it
+    holds; a re-auth flow stores a key/refresh token from a separate login,
+    which doesn't.
+    """
+    if entry.data.get(CONF_API_KEY) != getattr(api, "api_key", None):
+        return True
+    auth = getattr(api, "auth", None)
+    if not isinstance(auth, dict):
+        return False
+    running_refresh = (auth.get("refresh") or {}).get("token")
+    return entry.data.get(CONF_REFRESH_TOKEN) != running_refresh
 
 
 async def _async_migrate_unique_ids(
@@ -223,11 +244,13 @@ async def _async_migrate_unique_ids(
 async def async_migrate_entry(hass: HomeAssistant, entry: EonNextConfigEntry) -> bool:
     """Migrate old config entries.
 
-    v1 -> v2: E.ON replaced password login with API keys.  A v1 entry keeps
-    its data (so nothing is lost and entity/statistic ids are untouched) and
-    is only bumped; setup then raises ``ConfigEntryAuthFailed`` for an entry
-    without an API key, which starts a re-auth flow asking for one.  The
-    re-auth flow drops the legacy email/password once a key is saved.
+    v1 -> v2: E.ON replaced password login with API keys.  The entry is
+    kept in place (entity and statistic ids are untouched); the email and
+    password are deleted because nothing can use them any more and a
+    plaintext password should not linger in storage.  The legacy email
+    ``unique_id`` still marks the entry as pre-2.0.  Setup then raises
+    ``ConfigEntryAuthFailed`` for an entry without an API key, which starts
+    a re-auth flow asking for one.
     """
     if entry.version > CONFIG_ENTRY_VERSION:
         # Downgrade from a future version: refuse rather than guess.
@@ -235,9 +258,12 @@ async def async_migrate_entry(hass: HomeAssistant, entry: EonNextConfigEntry) ->
 
     if entry.version == 1:
         _LOGGER.debug("Migrating E.ON Next config entry from version 1 to 2")
-        hass.config_entries.async_update_entry(
-            entry, data=dict(entry.data), version=2
-        )
+        data = {
+            key: value
+            for key, value in entry.data.items()
+            if key not in (CONF_EMAIL, CONF_PASSWORD)
+        }
+        hass.config_entries.async_update_entry(entry, data=data, version=2)
 
     return True
 

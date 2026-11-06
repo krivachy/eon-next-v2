@@ -17,13 +17,17 @@ This project is a fork of [madmachinations/eon-next-v2](https://github.com/madma
 
 * **auth:** log in with an E.ON Next API key via `obtainKrakenToken(input: {APIKey})`; the config flow asks for the key only and identifies the entry by E.ON account number instead of email
 * **auth:** re-authentication accepts a new key, or reuses the saved key when the field is left blank; a key for a different account is refused
-* **auth:** config entry version 2 with `async_migrate_entry`; legacy email/password entries start a re-auth flow instead of failing, and the stored email/password are removed once a key is saved
+* **auth:** config entry version 2 with `async_migrate_entry`; the unusable email/password are deleted during migration and legacy entries start a re-auth flow asking for a key instead of failing. Adding the integration again while a legacy entry awaits re-auth is refused, so meters aren't duplicated
+* **auth:** entries are titled with the E.ON account number, e.g. `Eon Next (A-1234ABCD)`
 * **auth:** redact API keys, access tokens, refresh tokens and emails from log output and error messages
 
 
 ### Bug Fixes
 
 * **auth:** fall back to the stored API key when E.ON rejects the refresh token (`Invalid data.` or 401/403), so token expiry and restarts need no user action
+* **auth:** a re-auth on a running entry is applied by the integration's own update listener instead of the flow-side reload Home Assistant deprecates (breaks in 2026.12)
+* **api:** a non-JSON (HTML) GraphQL error page is reported as an API error instead of an unexpected exception; a malformed login token shows "invalid key" instead of "unknown error"
+* **docs:** the API key script finds the Auth0 token in more cache layouts, explains that E.ON only shows an existing key masked, and `API_KEY.md` documents how to regenerate a lost key
 * **release:** build `eon_next.zip` without `__pycache__`/`*.pyc`, and add a workflow to attach it to manually published releases
 
 

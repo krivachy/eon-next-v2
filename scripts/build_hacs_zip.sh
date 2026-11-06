@@ -16,6 +16,14 @@ case "$out" in
   *) out="$PWD/$out" ;;
 esac
 
+# A hand build zips the working tree, so warn about local changes that a
+# release build (clean checkout) would not contain.
+if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+  if [ -n "$(git -C "$root" status --porcelain -- custom_components/eon_next)" ]; then
+    echo "WARNING: custom_components/eon_next has uncommitted or untracked changes; they will be included." >&2
+  fi
+fi
+
 rm -f "$out"
 cd "$root/custom_components/eon_next"
 zip -r -q "$out" . -x '*__pycache__*' -x '*.pyc'

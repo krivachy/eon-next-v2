@@ -147,6 +147,7 @@ async def test_user_flow_creates_entry(
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["data"] == {CONF_API_KEY: API_KEY, CONF_REFRESH_TOKEN: "rt-1"}
     assert result["result"].unique_id == "A-1234ABCD"
+    assert result["result"].title == "Eon Next (A-1234ABCD)"
     assert result["result"].version == 2
     assert fake.keys_tried == [API_KEY]
     assert fake.closed is True
@@ -229,11 +230,16 @@ async def test_user_flow_duplicate_aborts(
     assert result["reason"] == "already_configured"
 
 
-def _no_reload(hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Don't actually reload (which would run full setup) during the test."""
+def _no_reload(hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Don't actually reload (which would run full setup); record requests."""
+    reloads: list[str] = []
     monkeypatch.setattr(
-        hass.config_entries, "async_schedule_reload", lambda *a, **k: None, raising=False
+        hass.config_entries,
+        "async_schedule_reload",
+        lambda entry_id, *a, **k: reloads.append(entry_id),
+        raising=False,
     )
+    return reloads
 
 
 async def _run_reauth(
@@ -271,7 +277,7 @@ async def test_reauth_with_new_key(
     await _ensure_recorder(hass)
     entry = _v2_entry()
     entry.add_to_hass(hass)
-    _no_reload(hass, monkeypatch)
+    reloads = _no_reload(hass, monkeypatch)
 
     fake = _FakeFlowApi(token="fresh-rt")
     result = await _run_reauth(hass, entry, fake, {CONF_API_KEY: API_KEY})
@@ -281,6 +287,8 @@ async def test_reauth_with_new_key(
     assert fake.keys_tried == [API_KEY]
     assert entry.data == {CONF_API_KEY: API_KEY, CONF_REFRESH_TOKEN: "fresh-rt"}
     assert entry.unique_id == ACCOUNT
+    # Not loaded (no update listener): the flow schedules the reload itself.
+    assert reloads == [entry.entry_id]
 
 
 @pytest.mark.asyncio
@@ -395,6 +403,7 @@ async def test_reauth_legacy_entry_requires_key_and_scrubs_password(
     assert result["reason"] == "reauth_successful"
     assert entry.data == {CONF_API_KEY: API_KEY, CONF_REFRESH_TOKEN: "fresh-rt"}
     assert entry.unique_id == ACCOUNT
+    assert entry.title == "Eon Next (A-1234ABCD)"
 
 
 @pytest.mark.asyncio
@@ -416,3 +425,73 @@ async def test_reauth_legacy_entry_aborts_if_account_already_configured(
     assert result["reason"] == "already_configured"
     assert entry.data[CONF_EMAIL] == "user@example.com"
     assert entry.unique_id == "user@example.com"
+
+
+@pytest.mark.asyncio
+async def test_reauth_loaded_entry_leaves_reload_to_listener(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With an update listener, the flow must not schedule the reload itself.
+
+    HA deprecates async_update_reload_and_abort for such entries (breaks in
+    2026.12); the integration's listener reloads on changed credentials.
+    """
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    entry = _v2_entry()
+    entry.add_to_hass(hass)
+    listener_calls: list[str] = []
+
+    async def _listener(_hass: HomeAssistant, updated: Any) -> None:
+        listener_calls.append(updated.entry_id)
+
+    entry.add_update_listener(_listener)
+    reloads = _no_reload(hass, monkeypatch)
+
+    result = await _run_reauth(
+        hass, entry, _FakeFlowApi(token="fresh-rt"), {CONF_API_KEY: API_KEY}
+    )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert entry.data[CONF_REFRESH_TOKEN] == "fresh-rt"
+    assert reloads == []
+    await hass.async_block_till_done()
+    assert listener_calls == [entry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_user_flow_refused_while_legacy_entry_awaits_reauth(
+    hass: HomeAssistant, enable_custom_integrations: None
+) -> None:
+    """Adding the integration again must not duplicate a pre-2.0 entry."""
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    _legacy_entry().add_to_hass(hass)
+    fake = _FakeFlowApi()
+
+    with _patch_api(fake):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "legacy_entry_needs_reauth"
+    assert fake.keys_tried == []
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+
+
+@pytest.mark.asyncio
+async def test_user_flow_malformed_token_is_invalid_auth(
+    hass: HomeAssistant, enable_custom_integrations: None
+) -> None:
+    """A malformed token payload (EonNextAuthError from login) is invalid_auth."""
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    fake = _FakeFlowApi(raises=EonNextAuthError("Malformed authentication token payload"))
+    result = await _start_user_flow(hass, fake, API_KEY)
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_auth"}

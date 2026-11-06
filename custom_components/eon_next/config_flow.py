@@ -85,7 +85,12 @@ async def _validate_api_key(api_key: str) -> _ValidatedKey:
     """
     api = EonNext()
     try:
-        if not await api.login_with_api_key(api_key, initialise=False):
+        try:
+            logged_in = await api.login_with_api_key(api_key, initialise=False)
+        except EonNextAuthError as err:
+            # e.g. a malformed token payload: treat as a rejected key.
+            raise InvalidApiKey from err
+        if not logged_in:
             raise InvalidApiKey
         refresh_token = api.auth["refresh"]["token"]
         try:
@@ -99,6 +104,11 @@ async def _validate_api_key(api_key: str) -> _ValidatedKey:
         )
     finally:
         await api.async_close()
+
+
+def _entry_title(account_number: str) -> str:
+    """Entry title that tells several E.ON accounts apart."""
+    return f"Eon Next ({account_number})"
 
 
 def _is_legacy_unique_id(unique_id: str | None) -> bool:
@@ -142,6 +152,16 @@ class EonNextConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Invoked when a user initiates a flow via the user interface."""
         errors: dict[str, str] = {}
 
+        # A pre-2.0 entry (keyed by email) can't be matched to an account
+        # number until it is re-authenticated.  Adding a second entry for the
+        # same account would duplicate every meter entity, so send the user
+        # to re-authenticate the existing entry instead.
+        if any(
+            _is_legacy_unique_id(entry.unique_id)
+            for entry in self._async_current_entries(include_ignore=False)
+        ):
+            return self.async_abort(reason="legacy_entry_needs_reauth")
+
         if user_input is not None:
             api_key = str(user_input.get(CONF_API_KEY) or "").strip()
             if not api_key:
@@ -150,7 +170,7 @@ class EonNextConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(validated.primary_account)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
-                    title="Eon Next",
+                    title=_entry_title(validated.primary_account),
                     data={
                         CONF_API_KEY: api_key,
                         CONF_REFRESH_TOKEN: validated.refresh_token,
@@ -183,6 +203,7 @@ class EonNextConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             elif (validated := await self._async_check_key(api_key, errors)) is not None:
                 current_unique_id = reauth_entry.unique_id
+                title = reauth_entry.title
                 if _is_legacy_unique_id(current_unique_id):
                     # Pre-2.0 entry keyed by email: re-key it to the account
                     # number, unless another entry already owns that account.
@@ -193,6 +214,7 @@ class EonNextConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         and existing.entry_id != reauth_entry.entry_id
                     ):
                         return self.async_abort(reason="already_configured")
+                    title = _entry_title(new_unique_id)
                 elif current_unique_id not in validated.account_numbers:
                     # Re-auth must stay on the same account: rebinding the
                     # entry to another account would leave its unique_id and
@@ -208,9 +230,22 @@ class EonNextConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
                 data[CONF_API_KEY] = api_key
                 data[CONF_REFRESH_TOKEN] = validated.refresh_token
+                if reauth_entry.update_listeners:
+                    # Loaded entry: its update listener reloads it when the
+                    # stored credentials no longer match the running client
+                    # (HA deprecates the flow-side reload for such entries).
+                    return self.async_update_and_abort(
+                        reauth_entry,
+                        unique_id=new_unique_id,
+                        title=title,
+                        data=data,
+                        reason="reauth_successful",
+                    )
+                # Failed/not-loaded entry (no listener): reload it from here.
                 return self.async_update_reload_and_abort(
                     reauth_entry,
                     unique_id=new_unique_id,
+                    title=title,
                     data=data,
                     reason="reauth_successful",
                 )
@@ -227,15 +262,7 @@ class EonNextConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
-            description_placeholders={
-                "api_key_url": API_KEY_DOCS_URL,
-                "key_hint": (
-                    "Leave the field blank to reuse the API key already saved."
-                    if stored_key
-                    else "This entry was set up with an email and password, "
-                    "which E.ON no longer accepts."
-                ),
-            },
+            description_placeholders={"api_key_url": API_KEY_DOCS_URL},
         )
 
 
