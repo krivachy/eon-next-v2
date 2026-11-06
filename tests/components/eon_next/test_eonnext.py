@@ -15,6 +15,7 @@ from custom_components.eon_next.eonnext import (
     EonNextApiError,
     EonNextAuthError,
     METER_TYPE_ELECTRIC,
+    METER_TYPE_GAS,
 )
 
 _PAST_ISO = (datetime.now(tz=timezone.utc) - timedelta(days=1)).isoformat()
@@ -58,9 +59,11 @@ class _FakeSession:
     def __init__(self, responses: list[_FakeResponse]) -> None:
         self._responses = list(responses)
         self.headers_seen: list[dict[str, str]] = []
+        self.params_seen: list[dict[str, str]] = []
 
     def get(self, _url: str, params=None, headers=None) -> _FakeResponse:
         self.headers_seen.append(headers or {})
+        self.params_seen.append(dict(params or {}))
         return self._responses.pop(0)
 
     def post(self, _url: str, json=None, headers=None) -> _FakeResponse:
@@ -193,6 +196,67 @@ async def test_consumption_raises_auth_after_second_401() -> None:
             METER_TYPE_ELECTRIC, "sp-1", "m1", group_by="day", page_size=1
         )
     api._force_token_refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_consumption_half_hour_omits_group_by() -> None:
+    """Half-hourly is the endpoint default; ``group_by=half_hour`` is a 400."""
+    api = EonNext()
+    _seed_valid_auth(api)
+    session = _FakeSession([_FakeResponse(200, {"results": []})])
+    api._get_session = AsyncMock(return_value=session)  # type: ignore[method-assign]
+
+    await api.async_get_consumption(
+        METER_TYPE_ELECTRIC,
+        "sp-1",
+        "m1",
+        group_by="half_hour",
+        page_size=48,
+        period_from=_PAST_ISO,
+        period_to=_FUTURE_ISO,
+    )
+
+    assert session.params_seen == [
+        {"page_size": "48", "period_from": _PAST_ISO, "period_to": _FUTURE_ISO}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("meter_type", [METER_TYPE_ELECTRIC, METER_TYPE_GAS])
+@pytest.mark.parametrize("group_by", ["day", "week", "month"])
+async def test_consumption_sends_non_default_group_by(
+    meter_type: str, group_by: str
+) -> None:
+    """Coarser granularities must still be requested explicitly."""
+    api = EonNext()
+    _seed_valid_auth(api)
+    session = _FakeSession([_FakeResponse(200, {"results": []})])
+    api._get_session = AsyncMock(return_value=session)  # type: ignore[method-assign]
+
+    await api.async_get_consumption(
+        meter_type, "sp-1", "m1", group_by=group_by, page_size=7
+    )
+
+    assert session.params_seen == [{"group_by": group_by, "page_size": "7"}]
+
+
+@pytest.mark.asyncio
+async def test_consumption_half_hour_retry_keeps_group_by_omitted() -> None:
+    """The 401 refresh-and-retry re-sends the same params (no group_by)."""
+    api = EonNext()
+    _seed_valid_auth(api)
+    api._force_token_refresh = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    session = _FakeSession([
+        _FakeResponse(401),
+        _FakeResponse(200, {"results": []}),
+    ])
+    api._get_session = AsyncMock(return_value=session)  # type: ignore[method-assign]
+
+    await api.async_get_consumption(
+        METER_TYPE_GAS, "sp-1", "m1", group_by="half_hour", page_size=1
+    )
+
+    assert session.params_seen == [{"page_size": "1"}, {"page_size": "1"}]
 
 
 @pytest.mark.asyncio

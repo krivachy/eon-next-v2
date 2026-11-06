@@ -18,11 +18,15 @@ from .const import (
     CARDS_URL,
     CONF_API_KEY,
     CONF_EMAIL,
+    CONF_GAS_CALORIFIC_VALUE,
+    CONF_GAS_CONSUMPTION_IN_M3,
     CONF_PASSWORD,
     CONF_REFRESH_TOKEN,
     CONF_SHOW_CARD,
     CONF_SHOW_PANEL,
     CONFIG_ENTRY_VERSION,
+    DEFAULT_GAS_CALORIFIC_VALUE,
+    DEFAULT_GAS_CONSUMPTION_IN_M3,
     DEFAULT_SHOW_CARD,
     DEFAULT_SHOW_PANEL,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
@@ -292,6 +296,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: EonNextConfigEntry) -> b
 
     api.set_token_update_callback(_persist_refresh_token)
     api.api_key = api_key
+    # Options changes reload the entry, so these are fixed for its lifetime.
+    api.gas_consumption_in_m3 = bool(
+        entry.options.get(CONF_GAS_CONSUMPTION_IN_M3, DEFAULT_GAS_CONSUMPTION_IN_M3)
+    )
+    api.gas_calorific_value = float(
+        entry.options.get(CONF_GAS_CALORIFIC_VALUE, DEFAULT_GAS_CALORIFIC_VALUE)
+    )
 
     # All login, account/meter loading, and manager initialisation is wrapped
     # so that a failure is mapped to the correct HA outcome (re-auth vs retry)

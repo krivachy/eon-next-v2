@@ -17,6 +17,8 @@ from custom_components.eon_next.backfill import EonNextBackfillManager
 from custom_components.eon_next.const import (
     CONF_BACKFILL_ENABLED,
     CONF_API_KEY,
+    CONF_GAS_CALORIFIC_VALUE,
+    CONF_GAS_CONSUMPTION_IN_M3,
     CONF_REFRESH_TOKEN,
     DOMAIN,
 )
@@ -80,6 +82,8 @@ class FakeApi:
         self.api_key_login_calls: list[str] = []
         self.closed = False
         self.api_key: str | None = None
+        self.gas_consumption_in_m3: bool | None = None
+        self.gas_calorific_value: float | None = None
         self.accounts = [FakeAccount(meters=[FakeMeter()])]
         self._token_callback = None
 
@@ -343,6 +347,38 @@ async def test_options_update_reloads_entry(
         await hass.async_block_till_done()
 
     mock_reload.assert_called_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("options", "expected_in_m3", "expected_cv"),
+    [
+        ({}, True, 38.0),
+        (
+            {CONF_GAS_CONSUMPTION_IN_M3: False, CONF_GAS_CALORIFIC_VALUE: 39.3},
+            False,
+            39.3,
+        ),
+    ],
+)
+async def test_setup_applies_gas_unit_options_to_api(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    monkeypatch: pytest.MonkeyPatch,
+    options: dict[str, Any],
+    expected_in_m3: bool,
+    expected_cv: float,
+) -> None:
+    """Gas unit options configure the API client before the first refresh."""
+    del enable_custom_integrations
+    fake_api = FakeApi(refresh_login_result=True)
+    _patch_integration(monkeypatch, fake_api)
+    entry = _mock_entry(options=options)
+
+    await _setup_entry(hass, entry)
+
+    assert fake_api.gas_consumption_in_m3 is expected_in_m3
+    assert fake_api.gas_calorific_value == expected_cv
 
 
 @pytest.mark.asyncio

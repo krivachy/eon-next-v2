@@ -10,7 +10,7 @@ The integration currently provides cloud-polled monitoring for EON Next accounts
 - Platform support: `sensor`, `binary_sensor`, `event`
 - Frontend: sidebar panel + Lovelace card(s)
 - Services exposed: `add_cost_tracker`, `reset_cost_tracker`, `update_cost_tracker`
-- Options flow: panel visibility, card visibility, backfill configuration
+- Options flow: panel visibility, card visibility, backfill configuration, gas units (consumption reported in m³, calorific value)
 - Default polling interval: 30 minutes
 - Auth: per-account API key (`sk_live_...`, see `API_KEY.md`) with refresh token persistence; a rejected refresh token falls back to the API key. Email/password login was removed in 2.0.0 (E.ON moved login to Auth0).
 
@@ -20,7 +20,7 @@ The integration currently provides cloud-polled monitoring for EON Next accounts
 - Re-auth flow for credential refresh
 - Multiple account support (all discovered accounts are loaded)
 - Refresh token persistence to reduce full re-login frequency
-- Options flow for panel visibility, card registration visibility, and historical backfill configuration
+- Options flow for panel visibility, card registration visibility, historical backfill configuration, and gas units
 
 ## Implemented Sensor Features
 
@@ -46,7 +46,9 @@ Export electricity meters add:
 
 Gas meters add:
 - Gas reading (m3)
-- Gas reading converted to kWh
+- Gas reading converted to kWh (configurable calorific value, default 38 MJ/m3)
+
+Gas consumption from the REST endpoint (m3 on SMETS2 meters) is converted to kWh in the API client before it feeds consumption/cost sensors, statistics, backfill and the panel; the "Gas consumption is reported in m³" option turns this off for SMETS1 meters, which report kWh.
 
 ### Binary sensors (per meter)
 
@@ -110,7 +112,7 @@ Gas meters add:
 ## Current Gaps (Not Yet Implemented)
 
 - No calendar/switch/number/select/time/climate/water_heater platforms
-- No configurable update interval (options flow exists for backfill only)
+- No configurable update interval (options flow covers dashboard visibility, backfill and gas units)
 
 ## Notes
 

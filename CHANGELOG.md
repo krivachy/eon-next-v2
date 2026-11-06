@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 This project is a fork of [madmachinations/eon-next-v2](https://github.com/madmachinations/eon-next-v2), maintained by [@monsagri](https://github.com/monsagri).
 
+## [2.1.0](https://github.com/krivachy/eon-next-v2/compare/v2.0.0...v2.1.0) (2026-11-06)
+
+
+### ⚠ Gas statistics imported by earlier versions are about 11× too low
+
+SMETS2 gas meters report consumption in m³, but earlier versions treated it as kWh. Gas long‑term statistics (`eon_next:gas_<serial>_consumption`) imported by those versions, live or by backfill, are about 11× too low (one m³ is about 10.8 kWh). New data is correct from this release. To fix history, rebuild the statistics: under **Settings → Devices & services → Eon Next → Configure**, turn on *Enable historical statistics backfill* and *Clear and rebuild statistics before backfill*. If a backfill has already finished, also increase *History lookback window* by at least one day, which starts a new rebuild. The rebuild clears and re‑imports both electricity and gas statistics for the entry.
+
+
+### Features
+
+* **gas:** new option *Gas consumption is reported in m³* (default on). Gas consumption from the consumption endpoint is converted to kWh (m³ × 1.02264 × calorific value ÷ 3.6) before it is used for daily and previous‑day consumption, previous‑day cost, Energy Dashboard statistics, the historical backfill and the dashboard panel. Turn it off for SMETS1 gas meters, which already report kWh
+* **gas:** new option *Gas calorific value* (default 38 MJ/m³, range 30-45) for the m³ to kWh conversion, also used by the `Gas kWh` reading sensor. Your gas bill shows the value for your area
+
+
+### Bug Fixes
+
+* **api:** stop sending `group_by=half_hour` to the consumption endpoint, which since mid‑October 2026 rejects it with HTTP 400 (`half_hour is not a valid value for group_by`). Half‑hourly is the endpoint's default, so the parameter is now omitted. This restores half‑hourly daily consumption, previous‑day consumption and cost, and Energy Dashboard statistics, which had silently fallen back to daily data and stopped importing statistics (port of [monsagri/eon-next-v2#102](https://github.com/monsagri/eon-next-v2/pull/102))
+* **gas:** daily consumption, previous‑day consumption, previous‑day cost and gas statistics are in kWh for SMETS2 meters instead of raw m³ values labelled kWh
+
 ## [2.0.0](https://github.com/krivachy/eon-next-v2/compare/v1.10.0...v2.0.0) (2026-11-03)
 
 

@@ -11,7 +11,13 @@ from typing import Any
 
 import aiohttp
 
-from .const import API_BASE_URL
+from .const import (
+    API_BASE_URL,
+    DEFAULT_GAS_CALORIFIC_VALUE,
+    DEFAULT_GAS_CONSUMPTION_IN_M3,
+    GAS_MJ_PER_KWH,
+    GAS_VOLUME_CORRECTION,
+)
 from .redact import redact_secrets, redacted_error_messages
 
 _LOGGER = logging.getLogger(__name__)
@@ -19,6 +25,17 @@ _LOGGER = logging.getLogger(__name__)
 METER_TYPE_GAS = "gas"
 METER_TYPE_ELECTRIC = "electricity"
 METER_TYPE_UNKNOWN = "unknown"
+
+
+def gas_m3_to_kwh(
+    m3_value: float, calorific_value: float = DEFAULT_GAS_CALORIFIC_VALUE
+) -> float:
+    """Convert a gas volume in m3 to energy in kWh (unrounded).
+
+    Uses the standard UK billing formula: volume x volume correction factor
+    x calorific value (MJ/m3) / 3.6 (MJ per kWh).
+    """
+    return m3_value * GAS_VOLUME_CORRECTION * calorific_value / GAS_MJ_PER_KWH
 
 
 GET_ACCOUNT_DEVICES_QUERY = """
@@ -168,6 +185,11 @@ class EonNext:
         self._session: aiohttp.ClientSession | None = None
         self._auth_lock = asyncio.Lock()
         self._on_token_update: Callable[[str], None] | None = None
+        # Gas consumption units (configured from the entry options).  When
+        # ``gas_consumption_in_m3`` is set, gas consumption from the REST
+        # endpoint is converted to kWh before it reaches any caller.
+        self.gas_consumption_in_m3: bool = DEFAULT_GAS_CONSUMPTION_IN_M3
+        self.gas_calorific_value: float = DEFAULT_GAS_CALORIFIC_VALUE
         self.__reset_authentication()
         self.__reset_accounts()
 
@@ -580,7 +602,12 @@ class EonNext:
         else:
             return None
 
-        params: dict[str, str] = {"group_by": group_by, "page_size": str(page_size)}
+        # Half-hourly is the endpoint's default granularity, and it now rejects
+        # an explicit ``group_by=half_hour`` with HTTP 400, so omit the
+        # parameter for half-hourly requests.
+        params: dict[str, str] = {"page_size": str(page_size)}
+        if group_by != "half_hour":
+            params["group_by"] = group_by
         if period_from:
             params["period_from"] = period_from
         if period_to:
@@ -605,6 +632,10 @@ class EonNext:
                     if response.status == 200:
                         data = await response.json()
                         if "results" in data:
+                            if meter_type == METER_TYPE_GAS:
+                                data["results"] = self._gas_consumption_to_kwh(
+                                    data["results"]
+                                )
                             return data
                         # 200 with no results key: genuine "no data for this
                         # period" - distinct from a transport error below.
@@ -624,6 +655,37 @@ class EonNext:
                 raise EonNextApiError(
                     f"REST consumption request failed for {serial}: {detail}"
                 ) from err
+
+    def _gas_consumption_to_kwh(self, results: Any) -> Any:
+        """Return gas consumption entries with ``consumption`` in kWh.
+
+        This is the single place gas consumption units are normalised, so the
+        coordinator (daily/previous-day totals and cost), external statistics,
+        the historical backfill and the panel all see kWh.  SMETS2 meters
+        report m3; SMETS1 meters already report kWh and are passed through
+        when ``gas_consumption_in_m3`` is disabled.  Entries without a numeric
+        consumption are left untouched for downstream validation to skip.
+        """
+        if not self.gas_consumption_in_m3 or not isinstance(results, list):
+            return results
+
+        converted: list[Any] = []
+        for entry in results:
+            if isinstance(entry, dict):
+                raw: Any = entry.get("consumption")
+                try:
+                    m3_value = float(raw)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    entry = {
+                        **entry,
+                        "consumption": round(
+                            gas_m3_to_kwh(m3_value, self.gas_calorific_value), 6
+                        ),
+                    }
+            converted.append(entry)
+        return converted
 
     async def async_get_smart_charging_schedule(
         self,
@@ -1106,12 +1168,7 @@ class GasMeter(EnergyMeter):
 
     def get_latest_reading_kwh(self, m3_value: float) -> float:
         """Convert gas m3 reading to kWh."""
-        from .const import GAS_CALORIC_VALUE, GAS_VOLUME_CORRECTION
-
-        kwh = m3_value * GAS_VOLUME_CORRECTION
-        kwh = kwh * GAS_CALORIC_VALUE
-        kwh = kwh / 3.6
         # Keep sub-kWh precision (whole-kWh rounding loses real consumption on
-        # small deltas).  Calorific value is a fixed approximation (38) - real
-        # per-period values vary and would need a dedicated API source.
-        return round(kwh, 3)
+        # small deltas).  The calorific value is configurable in the options
+        # (default 38 MJ/m3); real per-period values vary slightly.
+        return round(gas_m3_to_kwh(m3_value, self.api.gas_calorific_value), 3)

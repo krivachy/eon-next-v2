@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import patch
 
+import pytest
+import voluptuous as vol
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.core import HomeAssistant
@@ -18,6 +21,8 @@ from custom_components.eon_next.const import (
     CONF_BACKFILL_REBUILD_STATISTICS,
     CONF_BACKFILL_REQUESTS_PER_RUN,
     CONF_BACKFILL_RUN_INTERVAL_MINUTES,
+    CONF_GAS_CALORIFIC_VALUE,
+    CONF_GAS_CONSUMPTION_IN_M3,
     CONF_SHOW_CARD,
     CONF_SHOW_PANEL,
     DEFAULT_BACKFILL_CHUNK_DAYS,
@@ -27,6 +32,8 @@ from custom_components.eon_next.const import (
     DEFAULT_BACKFILL_REBUILD_STATISTICS,
     DEFAULT_BACKFILL_REQUESTS_PER_RUN,
     DEFAULT_BACKFILL_RUN_INTERVAL_MINUTES,
+    DEFAULT_GAS_CALORIFIC_VALUE,
+    DEFAULT_GAS_CONSUMPTION_IN_M3,
     DEFAULT_SHOW_CARD,
     DEFAULT_SHOW_PANEL,
     DOMAIN,
@@ -80,3 +87,62 @@ async def test_options_flow_uses_defaults(
         == DEFAULT_BACKFILL_RUN_INTERVAL_MINUTES
     )
     assert defaults[CONF_BACKFILL_DELAY_SECONDS] == DEFAULT_BACKFILL_DELAY_SECONDS
+    assert defaults[CONF_GAS_CONSUMPTION_IN_M3] is DEFAULT_GAS_CONSUMPTION_IN_M3 is True
+    assert defaults[CONF_GAS_CALORIFIC_VALUE] == DEFAULT_GAS_CALORIFIC_VALUE == 38.0
+
+
+def _schema_defaults(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        marker.schema: (
+            marker.default() if callable(marker.default) else marker.default
+        )
+        for marker in result["data_schema"].schema
+        if hasattr(marker, "default")
+    }
+
+
+async def test_options_flow_saves_gas_settings(
+    hass: HomeAssistant, enable_custom_integrations: None
+) -> None:
+    """Gas unit settings are stored and pre-filled on the next visit."""
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    entry = MockConfigEntry(domain=DOMAIN, options={})
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    user_input = {
+        **_schema_defaults(result),
+        CONF_GAS_CONSUMPTION_IN_M3: False,
+        CONF_GAS_CALORIFIC_VALUE: 39.4,
+    }
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input=user_input
+    )
+
+    assert result["type"] == "create_entry"
+    assert entry.options[CONF_GAS_CONSUMPTION_IN_M3] is False
+    assert entry.options[CONF_GAS_CALORIFIC_VALUE] == 39.4
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    defaults = _schema_defaults(result)
+    assert defaults[CONF_GAS_CONSUMPTION_IN_M3] is False
+    assert defaults[CONF_GAS_CALORIFIC_VALUE] == 39.4
+
+
+@pytest.mark.parametrize("value", [29.9, 45.1])
+async def test_options_flow_rejects_implausible_calorific_value(
+    hass: HomeAssistant, enable_custom_integrations: None, value: float
+) -> None:
+    """Calorific values outside the UK range (30-45 MJ/m3) are refused."""
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    entry = MockConfigEntry(domain=DOMAIN, options={})
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    user_input = {**_schema_defaults(result), CONF_GAS_CALORIFIC_VALUE: value}
+    with pytest.raises(vol.Invalid):
+        await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=user_input
+        )
