@@ -580,7 +580,12 @@ class EonNext:
         else:
             return None
 
-        params: dict[str, str] = {"group_by": group_by, "page_size": str(page_size)}
+        # Half-hourly is the endpoint's default granularity, and it now rejects
+        # an explicit ``group_by=half_hour`` with HTTP 400, so omit the
+        # parameter for half-hourly requests.
+        params: dict[str, str] = {"page_size": str(page_size)}
+        if group_by != "half_hour":
+            params["group_by"] = group_by
         if period_from:
             params["period_from"] = period_from
         if period_to:
