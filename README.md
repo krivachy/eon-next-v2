@@ -65,7 +65,7 @@ Notes:
 ### Meters, readings and consumption
 
 - Latest electricity and gas meter readings, with reading‑date sensors.
-- Gas conversion from m³ to kWh.
+- Gas conversion from m³ to kWh (see [Gas units](#gas-units)).
 - Daily consumption sensors with a deliberate fallback chain: REST half‑hourly → REST daily.
 - Previous‑day consumption sensor (kWh) with data‑quality attributes (`entry_count`, `data_complete`).
 
@@ -173,6 +173,19 @@ Home Assistant prompts for re‑authentication only when E.ON rejects both the s
 - **Reuse the saved key:** leave the API key field blank (or paste the same key). The key is long‑lived, so this is usually all that's needed.
 - **New key:** paste the new `sk_live_...` key. It must belong to the same E.ON Next account; a key for a different account is refused.
 
+## Gas units
+
+SMETS2 gas meters (most smart meters) report consumption in cubic metres. The integration converts it to kWh with the standard UK formula, kWh = m³ × 1.02264 (volume correction) × calorific value ÷ 3.6, before it is used for consumption and cost sensors, Energy Dashboard statistics, the historical backfill and the dashboard panel.
+
+Two options under **Settings → Devices & Services → Eon Next → Configure** control this:
+
+| Option | Default | When to change it |
+|---|---|---|
+| Gas consumption is reported in m³ | on | Turn off for SMETS1 gas meters, which already report kWh. |
+| Gas calorific value | `38` MJ/m³ | Set it to the value on your gas bill for a closer match (allowed range 30-45). It also applies to the `Gas kWh` reading sensor. |
+
+Before `2.1.0`, gas consumption from SMETS2 meters was treated as kWh, so gas statistics imported by earlier versions are about 11× too low. See the [2.1.0 upgrade notes](#210-gas-consumption-in-kwh) to rebuild them.
+
 ## Historical backfill (configurable)
 
 The integration supports a slow, resumable historical backfill for Energy Dashboard statistics.
@@ -194,6 +207,12 @@ Conservative defaults:
 | Delay between requests | `300` seconds |
 
 ## Upgrade notes
+
+### 2.1.0: gas consumption in kWh
+
+- **Half‑hourly data is back.** Since mid‑October 2026 E.ON's consumption endpoint rejected the integration's half‑hourly request, so consumption fell back to daily data and Energy Dashboard statistics stopped updating. `2.1.0` fixes the request; no action is needed.
+- **Gas history is about 11× too low.** Earlier versions stored SMETS2 gas consumption (m³) as if it were kWh. New data is correct. To rebuild the history, open **Settings → Devices & Services → Eon Next → Configure** and turn on *Enable historical statistics backfill* and *Clear and rebuild statistics before backfill*. If a backfill has already finished, also increase *History lookback window* by at least one day; that starts a new rebuild. The rebuild clears and re‑imports both electricity and gas statistics for the entry, a day at a time with the default backfill settings.
+- **SMETS1 gas meters** already report kWh: turn off *Gas consumption is reported in m³*, otherwise gas values will be about 11× too high.
 
 ### 2.0.0: API‑key login (breaking)
 

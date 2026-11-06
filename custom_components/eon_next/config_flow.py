@@ -13,6 +13,9 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -28,6 +31,8 @@ from .const import (
     CONF_BACKFILL_REQUESTS_PER_RUN,
     CONF_BACKFILL_RUN_INTERVAL_MINUTES,
     CONF_EMAIL,
+    CONF_GAS_CALORIFIC_VALUE,
+    CONF_GAS_CONSUMPTION_IN_M3,
     CONF_PASSWORD,
     CONF_REFRESH_TOKEN,
     CONF_SHOW_CARD,
@@ -40,9 +45,13 @@ from .const import (
     DEFAULT_BACKFILL_REBUILD_STATISTICS,
     DEFAULT_BACKFILL_REQUESTS_PER_RUN,
     DEFAULT_BACKFILL_RUN_INTERVAL_MINUTES,
+    DEFAULT_GAS_CALORIFIC_VALUE,
+    DEFAULT_GAS_CONSUMPTION_IN_M3,
     DEFAULT_SHOW_CARD,
     DEFAULT_SHOW_PANEL,
     DOMAIN,
+    MAX_GAS_CALORIFIC_VALUE,
+    MIN_GAS_CALORIFIC_VALUE,
 )
 from .eonnext import EonNext, EonNextApiError, EonNextAuthError
 from .redact import redact_secrets
@@ -53,6 +62,16 @@ API_KEY_DOCS_URL = "https://github.com/krivachy/eon-next-v2/blob/main/API_KEY.md
 
 _API_KEY_SELECTOR = TextSelector(
     TextSelectorConfig(type=TextSelectorType.PASSWORD, autocomplete="off")
+)
+
+_GAS_CALORIFIC_VALUE_SELECTOR = NumberSelector(
+    NumberSelectorConfig(
+        min=MIN_GAS_CALORIFIC_VALUE,
+        max=MAX_GAS_CALORIFIC_VALUE,
+        step=0.01,
+        mode=NumberSelectorMode.BOX,
+        unit_of_measurement="MJ/m³",
+    )
 )
 
 
@@ -339,6 +358,20 @@ class EonNextOptionsFlow(config_entries.OptionsFlow):
                             DEFAULT_BACKFILL_DELAY_SECONDS,
                         ),
                     ): vol.All(vol.Coerce(int), vol.Range(min=0, max=3600)),
+                    vol.Required(
+                        CONF_GAS_CONSUMPTION_IN_M3,
+                        default=options.get(
+                            CONF_GAS_CONSUMPTION_IN_M3,
+                            DEFAULT_GAS_CONSUMPTION_IN_M3,
+                        ),
+                    ): bool,
+                    vol.Required(
+                        CONF_GAS_CALORIFIC_VALUE,
+                        default=options.get(
+                            CONF_GAS_CALORIFIC_VALUE,
+                            DEFAULT_GAS_CALORIFIC_VALUE,
+                        ),
+                    ): _GAS_CALORIFIC_VALUE_SELECTOR,
                 }
             ),
         )
