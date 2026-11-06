@@ -200,6 +200,7 @@ async def test_run_backfill_cycle_advances_cursor_and_imports(monkeypatch) -> No
         "rebuild_done": True,
         "lookback_days": 3650,
         "meters": {"m1": {"next_start": _REF_PREV_ISO, "done": False}},
+        "half_hourly": True,
     }
     manager._save_state = AsyncMock()  # type: ignore[method-assign]
     manager.api.async_get_consumption = AsyncMock(  # type: ignore[attr-defined]
@@ -248,6 +249,7 @@ async def test_run_backfill_cycle_leaves_cursor_on_api_error(monkeypatch) -> Non
         "rebuild_done": True,
         "lookback_days": 3650,
         "meters": {"m1": {"next_start": _REF_PREV_ISO, "done": False}},
+        "half_hourly": True,
     }
     manager._save_state = AsyncMock()  # type: ignore[method-assign]
     manager.api.async_get_consumption = AsyncMock(  # type: ignore[attr-defined]

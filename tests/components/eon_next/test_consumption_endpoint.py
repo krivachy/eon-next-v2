@@ -439,13 +439,27 @@ async def test_coordinator_gas_totals_and_cost_are_in_kwh() -> None:
     coordinator._cost_warning_logged = set()
     coordinator.hass = SimpleNamespace()
 
-    with patch(
-        "custom_components.eon_next.coordinator.async_import_consumption_statistics",
-        AsyncMock(),
-    ) as import_mock:
+    with (
+        patch(
+            "custom_components.eon_next.coordinator.async_import_consumption_statistics",
+            AsyncMock(),
+        ) as import_mock,
+        patch(
+            "custom_components.eon_next.coordinator.async_import_cost_statistics",
+            AsyncMock(),
+        ) as cost_mock,
+    ):
         data = await coordinator._async_update_data()
 
     expected_kwh = 4.8 * _KWH_PER_M3
+    # The cost statistic is imported from the same kWh entries, with the
+    # resolved tariff (GBP) on the meter data.
+    cost_mock.assert_awaited_once()
+    _hass, c_serial, c_type, c_entries, c_meter_data = cost_mock.await_args.args
+    assert (c_serial, c_type) == (gas.serial, METER_TYPE_GAS)
+    assert c_entries is import_mock.await_args.args[3]
+    assert c_meter_data["tariff_unit_rate"] == pytest.approx(0.06)
+    assert c_meter_data["standing_charge"] == pytest.approx(0.30)
     meter_data = data[gas.serial]
     assert meter_data["previous_day_consumption"] == pytest.approx(
         expected_kwh, abs=1e-3
@@ -465,23 +479,11 @@ async def test_coordinator_gas_totals_and_cost_are_in_kwh() -> None:
 # --- Historical backfill -------------------------------------------------------
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("in_m3", "expected_daily_kwh"),
-    [(True, round(12.0 * _KWH_PER_M3, 3)), (False, 12.0)],
-)
-async def test_backfill_imports_gas_history_in_kwh(
-    hass: HomeAssistant, in_m3: bool, expected_daily_kwh: float
-) -> None:
-    """Backfill uses the same client call, so its gas history is kWh too."""
-    await _ensure_recorder(hass)
-    endpoint = _ConsumptionEndpoint({}, {"gas": [_slot(_DAY, 12.0)]})
-    api = _api(endpoint, gas_consumption_in_m3=in_m3)
-    _account_, _electric, gas = _account(api)
-    gas.serial = f"G4BACKFILL{int(in_m3)}"  # isolate recorder state per case
-    api.accounts[0].meters = [gas]
+def _backfill_manager(
+    hass: HomeAssistant, api: EonNext, serial: str, start: datetime, entry_id: str
+) -> EonNextBackfillManager:
     entry = SimpleNamespace(
-        entry_id=f"backfill-{in_m3}",
+        entry_id=entry_id,
         options={
             CONF_BACKFILL_ENABLED: True,
             CONF_BACKFILL_REBUILD_STATISTICS: False,
@@ -497,14 +499,67 @@ async def test_backfill_imports_gas_history_in_kwh(
         "initialized": True,
         "rebuild_done": True,
         "lookback_days": 3650,
-        "meters": {gas.serial: {"next_start": _DAY.date().isoformat(), "done": False}},
+        "meters": {serial: {"next_start": start.date().isoformat(), "done": False}},
+        "half_hourly": True,
     }
+    return manager
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("in_m3", "expected_daily_kwh"),
+    [(True, 12.0 * _KWH_PER_M3), (False, 12.0)],
+)
+async def test_backfill_imports_gas_history_in_kwh(
+    hass: HomeAssistant, in_m3: bool, expected_daily_kwh: float
+) -> None:
+    """Backfill fetches half-hourly gas history through the same client, in kWh."""
+    from homeassistant.util import dt as dt_util
+
+    await _ensure_recorder(hass)
+    day = dt_util.as_utc(dt_util.start_of_local_day(_DAY.date()))
+    endpoint = _ConsumptionEndpoint({"gas": _half_hours(day, [6.0, 6.0])})
+    api = _api(endpoint, gas_consumption_in_m3=in_m3)
+    _account_, _electric, gas = _account(api)
+    gas.serial = f"G4BACKFILL{int(in_m3)}"  # isolate recorder state per case
+    api.accounts[0].meters = [gas]
+    manager = _backfill_manager(hass, api, gas.serial, day, f"backfill-{in_m3}")
 
     await manager._run_backfill_cycle()
 
+    # Half-hourly: no group_by, bounded to the chunk's local day.
     (_url, params), = endpoint.requests
-    assert params["group_by"] == "day"
+    assert "group_by" not in params
+    assert params["period_from"] == day.strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert params["page_size"] == "50"
     gas_id = statistic_id_for_meter(gas.serial, METER_TYPE_GAS)
     assert gas_id is not None
     changes = await _read_hourly_changes(hass, gas_id, expect=1)
     assert sum(changes) == pytest.approx(expected_daily_kwh, abs=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_backfill_falls_back_to_daily_without_half_hourly(
+    hass: HomeAssistant,
+) -> None:
+    """A period with no half-hourly data is backfilled from daily buckets."""
+    from homeassistant.util import dt as dt_util
+
+    await _ensure_recorder(hass)
+    day = dt_util.as_utc(dt_util.start_of_local_day(_DAY.date()))
+    endpoint = _ConsumptionEndpoint({}, {"gas": [_slot(day, 12.0)]})
+    api = _api(endpoint, gas_consumption_in_m3=False)
+    _account_, _electric, gas = _account(api)
+    gas.serial = "G4DAILYFALLBACK"
+    api.accounts[0].meters = [gas]
+    manager = _backfill_manager(hass, api, gas.serial, day, "backfill-daily")
+
+    await manager._run_backfill_cycle()
+
+    (_u1, hh_params), (_u2, day_params) = endpoint.requests
+    assert "group_by" not in hh_params
+    assert day_params["group_by"] == "day"
+    gas_id = statistic_id_for_meter(gas.serial, METER_TYPE_GAS)
+    assert gas_id is not None
+    changes = await _read_hourly_changes(hass, gas_id, expect=1)
+    assert sum(changes) == pytest.approx(12.0, abs=1e-3)

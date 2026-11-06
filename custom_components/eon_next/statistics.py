@@ -3,6 +3,12 @@
 Imports half-hourly (or daily) consumption data as external statistics
 with correct timestamps so the Energy Dashboard attributes consumption
 to the right period - even when data arrives late.
+
+Alongside each meter's consumption statistic a matching cost statistic
+(``eon_next:<fuel>_<serial>_cost``, GBP) is imported: each half-hour's kWh
+priced at its own unit rate, plus the daily standing charge in the first
+hour of each local day.  The Energy Dashboard can use it as the source's
+cost statistic (``stat_cost``).
 """
 
 from __future__ import annotations
@@ -19,6 +25,14 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .eonnext import METER_TYPE_ELECTRIC, METER_TYPE_GAS
+from .tariff_helpers import rate_for_timestamp
+
+# Precision (decimal places) of stored cumulative sums.  Energy keeps the
+# historical 3 dp (Wh); money keeps 4 dp (0.01p) so per-hour rounding does not
+# drift a long-running cost sum by whole pence.
+_ENERGY_NDIGITS = 3
+_COST_NDIGITS = 4
+_COST_UNIT = "GBP"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,16 +61,55 @@ def _hour_start(dt: datetime) -> datetime:
     return dt.replace(minute=0, second=0, microsecond=0)
 
 
-def statistic_id_for_meter(meter_serial: str, meter_type: str) -> str | None:
-    """Build statistic_id for a supported meter."""
-    sanitized_serial = _sanitize_id(meter_serial)
+def _fuel_for_meter_type(meter_type: str) -> str | None:
     if meter_type == METER_TYPE_GAS:
-        fuel = "gas"
-    elif meter_type == METER_TYPE_ELECTRIC:
-        fuel = "electricity"
-    else:
+        return "gas"
+    if meter_type == METER_TYPE_ELECTRIC:
+        return "electricity"
+    return None
+
+
+def statistic_id_for_meter(meter_serial: str, meter_type: str) -> str | None:
+    """Build the consumption statistic_id for a supported meter."""
+    fuel = _fuel_for_meter_type(meter_type)
+    if fuel is None:
         return None
-    return f"{DOMAIN}:{fuel}_{sanitized_serial}_consumption"
+    return f"{DOMAIN}:{fuel}_{_sanitize_id(meter_serial)}_consumption"
+
+
+def cost_statistic_id_for_meter(meter_serial: str, meter_type: str) -> str | None:
+    """Build the cost (GBP) statistic_id for a supported meter."""
+    fuel = _fuel_for_meter_type(meter_type)
+    if fuel is None:
+        return None
+    return f"{DOMAIN}:{fuel}_{_sanitize_id(meter_serial)}_cost"
+
+
+def _parse_entry(entry: dict[str, Any]) -> tuple[datetime, float] | None:
+    """Return ``(interval_start_utc, kwh)`` for a valid consumption entry."""
+    interval_start = entry.get("interval_start")
+    consumption = entry.get("consumption")
+    if not interval_start or consumption is None:
+        return None
+
+    try:
+        val = float(consumption)
+    except (TypeError, ValueError):
+        return None
+
+    parsed = dt_util.parse_datetime(str(interval_start))
+    if parsed is None:
+        return None
+
+    if parsed.tzinfo is None:
+        _LOGGER.debug(
+            "Naive interval_start '%s' received; assuming UTC",
+            interval_start,
+        )
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = dt_util.as_utc(parsed)
+    return parsed, val
 
 
 def _group_consumption_by_hour(
@@ -66,30 +119,78 @@ def _group_consumption_by_hour(
     hourly: dict[datetime, float] = defaultdict(float)
 
     for entry in entries:
-        interval_start = entry.get("interval_start")
-        consumption = entry.get("consumption")
-        if not interval_start or consumption is None:
-            continue
-
-        try:
-            val = float(consumption)
-        except (TypeError, ValueError):
-            continue
-
-        parsed = dt_util.parse_datetime(str(interval_start))
+        parsed = _parse_entry(entry)
         if parsed is None:
             continue
+        start, kwh = parsed
+        hourly[_hour_start(start)] += kwh
 
-        if parsed.tzinfo is None:
-            _LOGGER.debug(
-                "Naive interval_start '%s' received; assuming UTC",
-                interval_start,
-            )
-            parsed = parsed.replace(tzinfo=timezone.utc)
+    return dict(hourly)
+
+
+def _local_midnight_utc(hour: datetime) -> datetime:
+    """Return the UTC start of the local day containing *hour*."""
+    local_day = dt_util.as_local(hour).date()
+    # Statistics rows must start on a UTC hour; floor in case the local
+    # timezone has a non-whole-hour offset.
+    return _hour_start(dt_util.as_utc(dt_util.start_of_local_day(local_day)))
+
+
+def _standing_charge(meter_data: dict[str, Any]) -> float | None:
+    for key in ("standing_charge", "tariff_standing_charge"):
+        value = meter_data.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _group_cost_by_hour(
+    entries: list[dict[str, Any]],
+    meter_data: dict[str, Any],
+    *,
+    daily_granularity: bool = False,
+) -> dict[datetime, float]:
+    """Price consumption entries into hourly UTC cost buckets (GBP).
+
+    Each half-hour is priced at the unit rate in effect at its own
+    ``interval_start`` (time-of-use aware), and the daily standing charge is
+    added to the first hour (local midnight) of every local day the entries
+    touch - creating that hour if it has no consumption.  Because the
+    standing charge is part of that hour's value, re-importing the hour
+    replaces it rather than adding it twice.
+
+    Daily buckets cannot be split across time-of-use windows, so with
+    ``daily_granularity`` they are priced at the tariff's flat/mean rate.
+
+    Returns an empty dict when no entry could be priced.
+    """
+    hourly: dict[datetime, float] = defaultdict(float)
+    flat_rate = meter_data.get("tariff_unit_rate")
+
+    for entry in entries:
+        parsed = _parse_entry(entry)
+        if parsed is None:
+            continue
+        start, kwh = parsed
+        if daily_granularity:
+            rate = float(flat_rate) if flat_rate is not None else None
         else:
-            parsed = dt_util.as_utc(parsed)
+            rate = rate_for_timestamp(meter_data, start)
+        if rate is None:
+            continue
+        hourly[_hour_start(start)] += kwh * rate
 
-        hourly[_hour_start(parsed)] += val
+    if not hourly:
+        return {}
+
+    standing = _standing_charge(meter_data)
+    if standing is not None:
+        for day_start in {_local_midnight_utc(hour) for hour in list(hourly)}:
+            hourly[day_start] += standing
 
     return dict(hourly)
 
@@ -165,17 +266,18 @@ async def _get_last_stat(
 
 
 def _build_statistic_metadata(
-    meter_serial: str, meter_type: str, statistic_id: str
+    meter_serial: str, meter_type: str, statistic_id: str, *, cost: bool = False
 ) -> dict[str, Any]:
-    """Build the StatisticMetaData kwargs for a meter's consumption stat."""
+    """Build the StatisticMetaData kwargs for a meter's consumption/cost stat."""
     fuel = "gas" if meter_type == METER_TYPE_GAS else "electricity"
     metadata_dict: dict[str, Any] = {
         "has_sum": True,
-        "name": f"{meter_serial} {fuel.title()} Consumption",
+        "name": f"{meter_serial} {fuel.title()} {'Cost' if cost else 'Consumption'}",
         "source": DOMAIN,
         "statistic_id": statistic_id,
-        "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
-        "unit_class": "energy",
+        "unit_of_measurement": _COST_UNIT if cost else UnitOfEnergy.KILO_WATT_HOUR,
+        # Currency has no unit converter, so it has no unit class.
+        "unit_class": None if cost else "energy",
     }
 
     # Use mean_type (modern HA) with has_mean fallback (older HA).
@@ -187,6 +289,58 @@ def _build_statistic_metadata(
         metadata_dict["has_mean"] = False
 
     return metadata_dict
+
+
+async def _async_append_hourly(
+    hass: HomeAssistant,
+    metadata_dict: dict[str, Any],
+    hourly: dict[datetime, float],
+    *,
+    ndigits: int,
+) -> int:
+    """Append hours newer than the latest stored row; return rows written.
+
+    Raises :class:`StatisticsLookupError` when the last-statistic lookup
+    fails, so the caller skips the cycle instead of importing from a guessed
+    (zero) base.
+    """
+    from homeassistant.components.recorder.models import (
+        StatisticData,
+        StatisticMetaData,
+    )
+    from homeassistant.components.recorder.statistics import (
+        async_add_external_statistics,
+    )
+
+    sorted_hours = sorted(hourly)
+    if not sorted_hours:
+        return 0
+    statistic_id = metadata_dict["statistic_id"]
+    last_start, last_sum = await _get_last_stat(hass, statistic_id, sorted_hours[0])
+
+    statistics: list[StatisticData] = []
+    cumulative_sum = last_sum
+    for hour in sorted_hours:
+        if last_start is not None and hour <= last_start:
+            continue
+
+        value = round(hourly[hour], ndigits)
+        cumulative_sum = round(cumulative_sum + value, ndigits)
+        statistics.append(
+            StatisticData(
+                start=hour,
+                state=cumulative_sum,
+                sum=cumulative_sum,
+            )
+        )
+
+    if not statistics:
+        return 0
+
+    async_add_external_statistics(
+        hass, StatisticMetaData(**metadata_dict), statistics
+    )
+    return len(statistics)
 
 
 async def async_import_consumption_statistics(
@@ -206,14 +360,6 @@ async def async_import_consumption_statistics(
     :func:`async_import_historical_statistics`, which can splice earlier hours
     in and rewrite subsequent sums.
     """
-    from homeassistant.components.recorder.models import (
-        StatisticData,
-        StatisticMetaData,
-    )
-    from homeassistant.components.recorder.statistics import (
-        async_add_external_statistics,
-    )
-
     hourly = _group_consumption_by_hour(consumption_entries)
     if not hourly:
         return
@@ -228,13 +374,9 @@ async def async_import_consumption_statistics(
         return
 
     metadata_dict = _build_statistic_metadata(meter_serial, meter_type, statistic_id)
-
-    sorted_hours = sorted(hourly.keys())
-    if not sorted_hours:
-        return
     try:
-        last_start, last_sum = await _get_last_stat(
-            hass, statistic_id, sorted_hours[0]
+        written = await _async_append_hourly(
+            hass, metadata_dict, hourly, ndigits=_ENERGY_NDIGITS
         )
     except StatisticsLookupError as err:
         # Skip this cycle entirely rather than import with a guessed base.
@@ -242,34 +384,50 @@ async def async_import_consumption_statistics(
             "Skipping statistics import for %s: %s", statistic_id, err
         )
         return
-
-    statistics: list[StatisticData] = []
-    cumulative_sum = last_sum
-    for hour in sorted_hours:
-        if last_start is not None and hour <= last_start:
-            continue
-
-        kwh = round(hourly[hour], 3)
-        cumulative_sum = round(cumulative_sum + kwh, 3)
-        statistics.append(
-            StatisticData(
-                start=hour,
-                state=cumulative_sum,
-                sum=cumulative_sum,
-            )
+    if written:
+        _LOGGER.debug(
+            "Imported %d hourly statistics for %s", written, statistic_id
         )
 
-    if not statistics:
+
+async def async_import_cost_statistics(
+    hass: HomeAssistant,
+    meter_serial: str,
+    meter_type: str,
+    consumption_entries: list[dict[str, Any]],
+    meter_data: dict[str, Any],
+) -> None:
+    """Import the meter's cost (GBP) statistic for half-hourly entries.
+
+    Append-only live counterpart of :func:`async_import_consumption_statistics`
+    for ``eon_next:<fuel>_<serial>_cost``.  *meter_data* supplies the tariff
+    (``tariff_unit_rate``/``tariff_rates_schedule``/``tariff_is_tou``) and the
+    daily standing charge; nothing is imported without a unit rate.
+    """
+    statistic_id = cost_statistic_id_for_meter(meter_serial, meter_type)
+    if statistic_id is None:
         return
 
-    async_add_external_statistics(
-        hass, StatisticMetaData(**metadata_dict), statistics
+    hourly = _group_cost_by_hour(consumption_entries, meter_data)
+    if not hourly:
+        return
+
+    metadata_dict = _build_statistic_metadata(
+        meter_serial, meter_type, statistic_id, cost=True
     )
-    _LOGGER.debug(
-        "Imported %d hourly statistics for %s",
-        len(statistics),
-        statistic_id,
-    )
+    try:
+        written = await _async_append_hourly(
+            hass, metadata_dict, hourly, ndigits=_COST_NDIGITS
+        )
+    except StatisticsLookupError as err:
+        _LOGGER.warning(
+            "Skipping cost statistics import for %s: %s", statistic_id, err
+        )
+        return
+    if written:
+        _LOGGER.debug(
+            "Imported %d hourly cost statistics for %s", written, statistic_id
+        )
 
 
 def _merge_and_recompute_series(
@@ -278,6 +436,7 @@ def _merge_and_recompute_series(
     new_hourly: dict[datetime, float],
     *,
     daily_granularity: bool = False,
+    ndigits: int = _ENERGY_NDIGITS,
 ) -> list[tuple[datetime, float]]:
     """Splice new hours into an existing series and recompute cumulative sums.
 
@@ -289,6 +448,7 @@ def _merge_and_recompute_series(
     consecutive cumulative sums, new hours overwrite existing ones, and the
     whole range is re-accumulated from ``baseline_sum`` so the series stays
     monotonic.  Returns ``(hour, cumulative_sum)`` for every hour in the range.
+    Values are rounded to ``ndigits`` decimal places.
 
     When ``daily_granularity`` is set, each entry in ``new_hourly`` represents a
     whole local day collapsed into one hour bucket.  A daily bucket that landed
@@ -302,7 +462,7 @@ def _merge_and_recompute_series(
     # Reconstruct each existing hour's own consumption from the sum deltas.
     prev_sum = baseline_sum
     for hour, cumulative in existing:
-        per_hour[hour] = round(cumulative - prev_sum, 3)
+        per_hour[hour] = round(cumulative - prev_sum, ndigits)
         prev_sum = cumulative
 
     effective_new = dict(new_hourly)
@@ -318,13 +478,13 @@ def _merge_and_recompute_series(
 
     # New (backfilled) values are authoritative for their hour.
     for hour, kwh in effective_new.items():
-        per_hour[hour] = round(kwh, 3)
+        per_hour[hour] = round(kwh, ndigits)
 
     # Re-accumulate from the baseline across the merged, ordered hours.
     result: list[tuple[datetime, float]] = []
     running = baseline_sum
     for hour in sorted(per_hour):
-        running = round(running + per_hour[hour], 3)
+        running = round(running + per_hour[hour], ndigits)
         result.append((hour, running))
     return result
 
@@ -387,25 +547,18 @@ def _row_start(row: dict[str, Any]) -> datetime | None:
     return None
 
 
-async def async_import_historical_statistics(
+async def _async_splice_hourly(
     hass: HomeAssistant,
-    meter_serial: str,
-    meter_type: str,
-    consumption_entries: list[dict[str, Any]],
+    metadata_dict: dict[str, Any],
+    hourly: dict[datetime, float],
     *,
-    daily_granularity: bool = False,
-) -> None:
-    """Import *historical* consumption without suspending live imports.
+    daily_granularity: bool,
+    ndigits: int,
+) -> int:
+    """Splice *hourly* into the stored series and rewrite later sums.
 
-    Unlike the append-only live path, this splices earlier hours into the
-    existing series and rewrites every subsequent cumulative sum so the series
-    stays monotonic - letting the historical backfill run concurrently with
-    live 30-minute imports.  Adding a constant to all later sums does not
-    change the per-period deltas the Energy Dashboard displays.
-
-    Set ``daily_granularity`` when ``consumption_entries`` are daily buckets so
-    a day the coordinator already imported at half-hourly resolution is not
-    double-counted (see :func:`_merge_and_recompute_series`).
+    Raises :class:`StatisticsLookupError` on a recorder lookup failure.
+    Returns the number of rows written.
     """
     from homeassistant.helpers.recorder import get_instance
     from homeassistant.components.recorder.models import (
@@ -416,39 +569,26 @@ async def async_import_historical_statistics(
         async_add_external_statistics,
     )
 
-    hourly = _group_consumption_by_hour(consumption_entries)
     if not hourly:
-        return
-
-    statistic_id = statistic_id_for_meter(meter_serial, meter_type)
-    if statistic_id is None:
-        _LOGGER.warning(
-            "Unknown meter type '%s' for serial %s; skipping statistics import",
-            meter_type,
-            meter_serial,
-        )
-        return
-
+        return 0
+    statistic_id = metadata_dict["statistic_id"]
     chunk_min = min(hourly)
     end = _hour_start(dt_util.utcnow()) + timedelta(hours=1)
 
-    try:
-        baseline_sum, existing = await _fetch_baseline_and_existing(
-            hass, statistic_id, chunk_min, end
-        )
-    except StatisticsLookupError as err:
-        _LOGGER.warning(
-            "Skipping historical statistics import for %s: %s", statistic_id, err
-        )
-        return
+    baseline_sum, existing = await _fetch_baseline_and_existing(
+        hass, statistic_id, chunk_min, end
+    )
 
     series = _merge_and_recompute_series(
-        baseline_sum, existing, hourly, daily_granularity=daily_granularity
+        baseline_sum,
+        existing,
+        hourly,
+        daily_granularity=daily_granularity,
+        ndigits=ndigits,
     )
     if not series:
-        return
+        return 0
 
-    metadata_dict = _build_statistic_metadata(meter_serial, meter_type, statistic_id)
     statistics = [
         StatisticData(start=hour, state=cumulative, sum=cumulative)
         for hour, cumulative in series
@@ -470,3 +610,85 @@ async def async_import_historical_statistics(
         statistic_id,
         chunk_min.isoformat(),
     )
+    return len(statistics)
+
+
+async def async_import_historical_statistics(
+    hass: HomeAssistant,
+    meter_serial: str,
+    meter_type: str,
+    consumption_entries: list[dict[str, Any]],
+    *,
+    daily_granularity: bool = False,
+    meter_data: dict[str, Any] | None = None,
+) -> None:
+    """Import *historical* consumption without suspending live imports.
+
+    Unlike the append-only live path, this splices earlier hours into the
+    existing series and rewrites every subsequent cumulative sum so the series
+    stays monotonic - letting the historical backfill run concurrently with
+    live 30-minute imports.  Adding a constant to all later sums does not
+    change the per-period deltas the Energy Dashboard displays.
+
+    Each hour present in ``consumption_entries`` replaces the stored hour, so
+    half-hourly data fully re-fills a day the live import only partly
+    covered, without double counting.
+
+    Set ``daily_granularity`` when ``consumption_entries`` are daily buckets so
+    a day the coordinator already imported at half-hourly resolution is not
+    double-counted (see :func:`_merge_and_recompute_series`).
+
+    When *meter_data* carries a tariff, the matching cost statistic is
+    spliced the same way (see :func:`_group_cost_by_hour`).
+    """
+    hourly = _group_consumption_by_hour(consumption_entries)
+    if not hourly:
+        return
+
+    statistic_id = statistic_id_for_meter(meter_serial, meter_type)
+    if statistic_id is None:
+        _LOGGER.warning(
+            "Unknown meter type '%s' for serial %s; skipping statistics import",
+            meter_type,
+            meter_serial,
+        )
+        return
+
+    metadata_dict = _build_statistic_metadata(meter_serial, meter_type, statistic_id)
+    try:
+        await _async_splice_hourly(
+            hass,
+            metadata_dict,
+            hourly,
+            daily_granularity=daily_granularity,
+            ndigits=_ENERGY_NDIGITS,
+        )
+    except StatisticsLookupError as err:
+        _LOGGER.warning(
+            "Skipping historical statistics import for %s: %s", statistic_id, err
+        )
+        return
+
+    if not meter_data:
+        return
+    cost_id = cost_statistic_id_for_meter(meter_serial, meter_type)
+    cost_hourly = _group_cost_by_hour(
+        consumption_entries, meter_data, daily_granularity=daily_granularity
+    )
+    if cost_id is None or not cost_hourly:
+        return
+    cost_metadata = _build_statistic_metadata(
+        meter_serial, meter_type, cost_id, cost=True
+    )
+    try:
+        await _async_splice_hourly(
+            hass,
+            cost_metadata,
+            cost_hourly,
+            daily_granularity=daily_granularity,
+            ndigits=_COST_NDIGITS,
+        )
+    except StatisticsLookupError as err:
+        _LOGGER.warning(
+            "Skipping historical cost statistics import for %s: %s", cost_id, err
+        )

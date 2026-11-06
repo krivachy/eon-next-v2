@@ -17,7 +17,10 @@ from .eonnext import (
     GasMeter,
     METER_TYPE_GAS,
 )
-from .statistics import async_import_consumption_statistics
+from .statistics import (
+    async_import_consumption_statistics,
+    async_import_cost_statistics,
+)
 from .tariff_helpers import cost_consumption_entries, get_current_rate
 
 _LOGGER = logging.getLogger(__name__)
@@ -227,6 +230,31 @@ class EonNextCoordinator(DataUpdateCoordinator):
                         meter_data["standing_charge"] = meter_data[
                             "tariff_standing_charge"
                         ]
+
+                    # Import the matching cost statistic (GBP) for the Energy
+                    # Dashboard, priced per half-hour at its own rate plus the
+                    # daily standing charge.  Same half-hourly-only rule as
+                    # consumption; export meters earn rather than cost, so
+                    # they get no cost statistic.
+                    if (
+                        consumption_granularity == "half_hour"
+                        and consumption
+                        and not getattr(meter, "is_export", False)
+                    ):
+                        try:
+                            await async_import_cost_statistics(
+                                self.hass,
+                                meter.serial,
+                                meter.type,
+                                consumption,
+                                meter_data,
+                            )
+                        except Exception as err:  # pylint: disable=broad-except
+                            _LOGGER.debug(
+                                "Cost statistics import failed for meter %s: %s",
+                                meter.serial,
+                                err,
+                            )
 
                     # Compute previous-day cost from consumption + tariff
                     # data when the cost endpoint cannot provide it.  Each
