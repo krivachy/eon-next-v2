@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -33,6 +34,12 @@ from .tariff_helpers import rate_for_timestamp
 _ENERGY_NDIGITS = 3
 _COST_NDIGITS = 4
 _COST_UNIT = "GBP"
+
+# An hour is "dirty" (stored value differs from E.ON's) beyond these margins.
+# Stored sums are rounded to _ENERGY_NDIGITS / _COST_NDIGITS, so values are
+# rounded the same way before comparing.
+_ENERGY_TOLERANCE = 1e-6  # kWh
+_COST_TOLERANCE = 1e-4  # GBP
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -291,6 +298,21 @@ def _build_statistic_metadata(
     return metadata_dict
 
 
+async def _async_flush_recorder(hass: HomeAssistant) -> None:
+    """Wait for queued statistics writes to be committed (best effort).
+
+    Appends are read back by the next splice/reconcile to rebase sums, and the
+    lock that serialises them is only meaningful if the write is durable before
+    it is released.
+    """
+    try:
+        from homeassistant.helpers.recorder import get_instance
+
+        await get_instance(hass).async_block_till_done()
+    except Exception as err:  # pylint: disable=broad-except
+        _LOGGER.debug("Could not wait for recorder after append: %s", err)
+
+
 async def _async_append_hourly(
     hass: HomeAssistant,
     metadata_dict: dict[str, Any],
@@ -340,6 +362,7 @@ async def _async_append_hourly(
     async_add_external_statistics(
         hass, StatisticMetaData(**metadata_dict), statistics
     )
+    await _async_flush_recorder(hass)
     return len(statistics)
 
 
@@ -692,3 +715,200 @@ async def async_import_historical_statistics(
         _LOGGER.warning(
             "Skipping historical cost statistics import for %s: %s", cost_id, err
         )
+
+
+@dataclass(slots=True)
+class ReconcileResult:
+    """Outcome of :func:`async_reconcile_recent_statistics` for one meter."""
+
+    # Hours that were already stored but missing/different, now rewritten.
+    consumption_filled: int = 0
+    cost_filled: int = 0
+    # Hours newer than the latest stored row that were appended.
+    consumption_appended: int = 0
+    cost_appended: int = 0
+    # Earliest rewritten hour across both statistics, if any.
+    first_filled: datetime | None = None
+
+    @property
+    def filled(self) -> int:
+        """Late/revised hours written (the larger of the two statistics)."""
+        return max(self.consumption_filled, self.cost_filled)
+
+
+def _stored_hourly_changes(
+    baseline_sum: float,
+    existing: list[tuple[datetime, float]],
+    ndigits: int,
+) -> dict[datetime, float]:
+    """Per-hour change reconstructed from stored cumulative sums."""
+    changes: dict[datetime, float] = {}
+    previous = baseline_sum
+    for hour, cumulative in existing:
+        changes[hour] = round(cumulative - previous, ndigits)
+        previous = cumulative
+    return changes
+
+
+async def _async_reconcile_hourly(
+    hass: HomeAssistant,
+    metadata_dict: dict[str, Any],
+    hourly: dict[datetime, float],
+    *,
+    window_start: datetime,
+    ndigits: int,
+    tolerance: float,
+) -> tuple[int, int, datetime | None]:
+    """Reconcile one statistic; return ``(filled, appended, first_filled)``.
+
+    *filled* counts hours at or before the newest stored row that were missing
+    or differed from storage; *appended* counts hours newer than it.  Stored
+    hours absent from *hourly* are never touched.  Raises
+    :class:`StatisticsLookupError` on a recorder lookup failure.
+    """
+    window = {hour: kwh for hour, kwh in hourly.items() if hour >= window_start}
+    if not window:
+        return 0, 0, None
+
+    statistic_id = metadata_dict["statistic_id"]
+    end = max(_hour_start(dt_util.utcnow()), max(window)) + timedelta(hours=1)
+    baseline_sum, existing = await _fetch_baseline_and_existing(
+        hass, statistic_id, window_start, end
+    )
+    stored = _stored_hourly_changes(baseline_sum, existing, ndigits)
+    last_stored = existing[-1][0] if existing else None
+
+    dirty = sorted(
+        hour
+        for hour, kwh in window.items()
+        if last_stored is not None
+        and hour <= last_stored
+        and (
+            hour not in stored
+            or abs(round(kwh, ndigits) - stored[hour]) > tolerance
+        )
+    )
+
+    if not dirty:
+        # Steady state: nothing stored needs changing, so rewrite nothing and
+        # just append hours newer than the latest stored row.
+        new_hours = {
+            hour: kwh
+            for hour, kwh in window.items()
+            if last_stored is None or hour > last_stored
+        }
+        appended = (
+            await _async_append_hourly(hass, metadata_dict, new_hours, ndigits=ndigits)
+            if new_hours
+            else 0
+        )
+        return 0, appended, None
+
+    # Splice from the first dirty hour onwards.  Every later hour in the
+    # response is passed (not just the dirty ones) so the recomputed series is
+    # contiguous; stored hours missing from the response are kept as they are.
+    first_dirty = dirty[0]
+    to_write = {hour: kwh for hour, kwh in window.items() if hour >= first_dirty}
+    await _async_splice_hourly(
+        hass,
+        metadata_dict,
+        to_write,
+        daily_granularity=False,
+        ndigits=ndigits,
+    )
+    appended = sum(1 for hour in to_write if hour > last_stored) if last_stored else 0
+    _LOGGER.info(
+        "Filled %d late hourly statistics for %s from %s",
+        len(dirty),
+        statistic_id,
+        first_dirty.isoformat(),
+    )
+    return len(dirty), appended, first_dirty
+
+
+async def async_reconcile_recent_statistics(
+    hass: HomeAssistant,
+    meter_serial: str,
+    meter_type: str,
+    entries: list[dict[str, Any]],
+    meter_data: dict[str, Any] | None,
+    *,
+    window_start: datetime,
+) -> ReconcileResult:
+    """Bring the last N days of statistics in line with *entries*.
+
+    Replaces the append-only live import when late-data reconciling is on.
+    For the consumption statistic, then the cost statistic, hours from
+    *window_start* onwards are compared with what is stored:
+
+    * No stored hour is missing or different: only hours newer than the latest
+      stored row are appended (nothing is rewritten).
+    * Otherwise the series is spliced from the first such hour onwards and
+      every later sum is rebased, so sums stay monotonic and nothing is double
+      counted.
+
+    A stored hour that is absent from *entries* is left exactly as it is: a
+    short or failed page must never erase data.  Pass ``meter_data=None`` for
+    meters without a cost statistic (export meters); cost is also skipped when
+    no unit rate is known.  The caller holds the per-entry statistics lock.
+    """
+    result = ReconcileResult()
+
+    statistic_id = statistic_id_for_meter(meter_serial, meter_type)
+    if statistic_id is None:
+        _LOGGER.warning(
+            "Unknown meter type '%s' for serial %s; skipping statistics import",
+            meter_type,
+            meter_serial,
+        )
+        return result
+
+    hourly = _group_consumption_by_hour(entries)
+    if hourly:
+        metadata_dict = _build_statistic_metadata(
+            meter_serial, meter_type, statistic_id
+        )
+        try:
+            filled, appended, first = await _async_reconcile_hourly(
+                hass,
+                metadata_dict,
+                hourly,
+                window_start=window_start,
+                ndigits=_ENERGY_NDIGITS,
+                tolerance=_ENERGY_TOLERANCE,
+            )
+        except StatisticsLookupError as err:
+            _LOGGER.warning("Skipping statistics reconcile for %s: %s", statistic_id, err)
+        else:
+            result.consumption_filled = filled
+            result.consumption_appended = appended
+            result.first_filled = first
+
+    cost_id = cost_statistic_id_for_meter(meter_serial, meter_type)
+    if not meter_data or cost_id is None:
+        return result
+    cost_hourly = _group_cost_by_hour(entries, meter_data)
+    if not cost_hourly:
+        return result
+    cost_metadata = _build_statistic_metadata(
+        meter_serial, meter_type, cost_id, cost=True
+    )
+    try:
+        filled, appended, first = await _async_reconcile_hourly(
+            hass,
+            cost_metadata,
+            cost_hourly,
+            window_start=window_start,
+            ndigits=_COST_NDIGITS,
+            tolerance=_COST_TOLERANCE,
+        )
+    except StatisticsLookupError as err:
+        _LOGGER.warning("Skipping cost statistics reconcile for %s: %s", cost_id, err)
+        return result
+    result.cost_filled = filled
+    result.cost_appended = appended
+    if first is not None and (
+        result.first_filled is None or first < result.first_filled
+    ):
+        result.first_filled = first
+    return result

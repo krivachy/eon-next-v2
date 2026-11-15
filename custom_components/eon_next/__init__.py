@@ -20,6 +20,7 @@ from .const import (
     CONF_EMAIL,
     CONF_GAS_CALORIFIC_VALUE,
     CONF_GAS_CONSUMPTION_IN_M3,
+    CONF_RECONCILE_DAYS,
     CONF_PASSWORD,
     CONF_REFRESH_TOKEN,
     CONF_SHOW_CARD,
@@ -27,6 +28,7 @@ from .const import (
     CONFIG_ENTRY_VERSION,
     DEFAULT_GAS_CALORIFIC_VALUE,
     DEFAULT_GAS_CONSUMPTION_IN_M3,
+    DEFAULT_RECONCILE_DAYS,
     DEFAULT_SHOW_CARD,
     DEFAULT_SHOW_PANEL,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
@@ -328,7 +330,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: EonNextConfigEntry) -> b
             if not authenticated:
                 raise ConfigEntryAuthFailed("Failed to authenticate with Eon Next")
 
-        coordinator = EonNextCoordinator(hass, api, DEFAULT_UPDATE_INTERVAL_MINUTES)
+        coordinator = EonNextCoordinator(
+            hass,
+            api,
+            DEFAULT_UPDATE_INTERVAL_MINUTES,
+            reconcile_days=int(
+                entry.options.get(CONF_RECONCILE_DAYS, DEFAULT_RECONCILE_DAYS)
+            ),
+        )
         backfill = EonNextBackfillManager(hass, entry, api, coordinator)
         cost_trackers = EonNextCostTrackerManager(hass, entry.entry_id, coordinator)
         await backfill.async_prime()

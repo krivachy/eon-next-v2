@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
+from .consumption_fetch import (
+    HALF_HOUR,
+    async_fetch_half_hourly,
+    utc_boundary,
+)
 from .eonnext import (
     EonNext,
     EonNextApiError,
@@ -20,6 +26,7 @@ from .eonnext import (
 from .statistics import (
     async_import_consumption_statistics,
     async_import_cost_statistics,
+    async_reconcile_recent_statistics,
 )
 from .tariff_helpers import cost_consumption_entries, get_current_rate
 
@@ -31,10 +38,37 @@ def ev_data_key(device_id: str) -> str:
     return f"ev::{device_id}"
 
 
+def _ceil_to(when: datetime, step: timedelta) -> datetime:
+    """Round *when* up to the next multiple of *step* since the hour."""
+    hour = when.replace(minute=0, second=0, microsecond=0)
+    steps = -(-(when - hour) // step)
+    return hour + steps * step
+
+
+def slots_in_local_day(day: date) -> int:
+    """Half-hour slots in local *day*: 48, or 46 / 50 on clocks-change days."""
+    length = utc_boundary(day + timedelta(days=1)) - utc_boundary(day)
+    return int(length // HALF_HOUR)
+
+
 class EonNextCoordinator(DataUpdateCoordinator):
     """Coordinator to manage fetching Eon Next data."""
 
-    def __init__(self, hass, api: EonNext, update_interval_minutes: int = 30):
+    # Days of history re-read each update to fill late half-hours (0 = off).
+    # A class-level default so a coordinator built without ``__init__`` (as
+    # some unit tests do) keeps the newest-100, append-only behaviour.
+    reconcile_days: int = 0
+    # Local-midnight-aligned start of the window the last successful dated
+    # fetch covered; ``None`` when the fetch fell back to newest-100.
+    _reconcile_window_start: datetime | None = None
+
+    def __init__(
+        self,
+        hass,
+        api: EonNext,
+        update_interval_minutes: int = 30,
+        reconcile_days: int = 0,
+    ):
         super().__init__(
             hass,
             _LOGGER,
@@ -42,7 +76,30 @@ class EonNextCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(minutes=update_interval_minutes),
         )
         self.api = api
+        self.reconcile_days = max(int(reconcile_days), 0)
         self._cost_warning_logged: set[str] = set()
+        self._statistics_lock = asyncio.Lock()
+        self._late_fill: dict[str, dict[str, Any]] = {}
+
+    @property
+    def statistics_lock(self) -> asyncio.Lock:
+        """Per-entry lock serialising every statistics splice/append.
+
+        Held by the live import/reconcile here and by the historical backfill,
+        so neither interleaves between reading a baseline sum and writing.
+        """
+        lock = getattr(self, "_statistics_lock", None)
+        if lock is None:
+            lock = self._statistics_lock = asyncio.Lock()
+        return lock
+
+    @property
+    def late_fill(self) -> dict[str, dict[str, Any]]:
+        """Last late-fill per meter serial: ``{"timestamp", "hours"}``."""
+        fills = getattr(self, "_late_fill", None)
+        if fills is None:
+            fills = self._late_fill = {}
+        return fills
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Fetch data from the Eon Next API."""
@@ -114,8 +171,15 @@ class EonNextCoordinator(DataUpdateCoordinator):
                             meter.latest_reading
                         )
 
-                    consumption, consumption_granularity = (
-                        await self._fetch_consumption(meter)
+                    (
+                        consumption,
+                        consumption_granularity,
+                        window_start,
+                    ) = await self._fetch_consumption_window(meter)
+                    reconciling = (
+                        window_start is not None
+                        and consumption_granularity == "half_hour"
+                        and bool(consumption)
                     )
                     if consumption is not None:
                         meter_data["consumption"] = consumption
@@ -145,14 +209,18 @@ class EonNextCoordinator(DataUpdateCoordinator):
                         # historical backfill owns complete past days).  Live
                         # imports always run now - the historical backfill
                         # recomputes sums instead of suspending them.
-                        if consumption_granularity == "half_hour":
+                        #
+                        # When reconciling, consumption and cost are imported
+                        # together below (cost needs the resolved tariff).
+                        if consumption_granularity == "half_hour" and not reconciling:
                             try:
-                                await async_import_consumption_statistics(
-                                    self.hass,
-                                    meter.serial,
-                                    meter.type,
-                                    consumption,
-                                )
+                                async with self.statistics_lock:
+                                    await async_import_consumption_statistics(
+                                        self.hass,
+                                        meter.serial,
+                                        meter.type,
+                                        consumption,
+                                    )
                             except Exception as err:  # pylint: disable=broad-except
                                 _LOGGER.debug(
                                     "Statistics import failed for meter %s: %s",
@@ -236,25 +304,42 @@ class EonNextCoordinator(DataUpdateCoordinator):
                     # daily standing charge.  Same half-hourly-only rule as
                     # consumption; export meters earn rather than cost, so
                     # they get no cost statistic.
-                    if (
+                    is_export = bool(getattr(meter, "is_export", False))
+                    if reconciling and window_start is not None and consumption:
+                        await self._reconcile_statistics(
+                            meter,
+                            consumption,
+                            None if is_export else meter_data,
+                            window_start,
+                        )
+                    elif (
                         consumption_granularity == "half_hour"
                         and consumption
-                        and not getattr(meter, "is_export", False)
+                        and not is_export
                     ):
                         try:
-                            await async_import_cost_statistics(
-                                self.hass,
-                                meter.serial,
-                                meter.type,
-                                consumption,
-                                meter_data,
-                            )
+                            async with self.statistics_lock:
+                                await async_import_cost_statistics(
+                                    self.hass,
+                                    meter.serial,
+                                    meter.type,
+                                    consumption,
+                                    meter_data,
+                                )
                         except Exception as err:  # pylint: disable=broad-except
                             _LOGGER.debug(
                                 "Cost statistics import failed for meter %s: %s",
                                 meter.serial,
                                 err,
                             )
+
+                    if reconciling and window_start is not None and consumption:
+                        meter_data["incomplete_days"] = self._incomplete_days(
+                            consumption, window_start
+                        )
+                        meter_data["last_late_fill"] = self.late_fill.get(
+                            meter.serial
+                        )
 
                     # Compute previous-day cost from consumption + tariff
                     # data when the cost endpoint cannot provide it.  Each
@@ -424,14 +509,72 @@ class EonNextCoordinator(DataUpdateCoordinator):
     ) -> tuple[list[dict[str, Any]] | None, str | None]:
         """Fetch consumption data, preferring half-hourly granularity.
 
-        Tries half-hourly REST data first (up to 96 half-hour slots,
-        approximately two days), then falls back to daily REST data.
+        See :meth:`_fetch_consumption_window`; this drops the window start.
+        """
+        entries, granularity, _window_start = await self._fetch_consumption_window(
+            meter
+        )
+        return entries, granularity
 
-        Returns ``(entries, granularity)`` where granularity is
+    def _reconcile_window(self) -> tuple[datetime, datetime]:
+        """UTC ``(period_from, period_to)`` for the reconcile fetch.
+
+        ``period_from`` is local midnight ``reconcile_days`` days before today
+        (a true local-day edge, so clocks-change days keep their 46/50 slots);
+        ``period_to`` is now rounded up to the next half-hour.
+        """
+        today = dt_util.now().date()
+        period_from = utc_boundary(today - timedelta(days=self.reconcile_days))
+        period_to = _ceil_to(dt_util.utcnow(), HALF_HOUR)
+        return period_from, period_to
+
+    async def _fetch_consumption_window(
+        self, meter
+    ) -> tuple[list[dict[str, Any]] | None, str | None, datetime | None]:
+        """Fetch consumption data, preferring half-hourly granularity.
+
+        With ``reconcile_days > 0`` the first attempt is a dated, paged
+        half-hourly request covering that many past days (one request in the
+        normal case), returned oldest first, so late-published half-hours can
+        be filled.  If it fails or is empty, falls back to the newest 100
+        half-hours, then to daily REST data.  The third element is the first
+        hour the entries fully cover - ``None`` unless the dated fetch
+        succeeded, in which case statistics are only appended, never
+        reconciled, because a newest-100 page may start part-way through an
+        hour.
+
+        Returns ``(entries, granularity, window_start)`` where granularity is
         ``"half_hour"`` or ``"day"``.  Callers must not import daily-granularity
         data into external statistics: today's partial daily bucket would be
         double-counted once the half-hourly hours become available.
         """
+        self._reconcile_window_start = None
+        if self.reconcile_days > 0:
+            try:
+                period_from, period_to = self._reconcile_window()
+                entries = await async_fetch_half_hourly(
+                    self.api,
+                    meter,
+                    period_from,
+                    period_to,
+                    self.reconcile_days + 1,
+                )
+                if entries:
+                    # Whole hours only: a window edge that is not on the hour
+                    # (non-whole-hour UTC offsets) would split its first hour.
+                    window_start = _ceil_to(period_from, timedelta(hours=1))
+                    self._reconcile_window_start = window_start
+                    return entries, "half_hour", window_start
+            except EonNextAuthError:
+                raise
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.debug(
+                    "Dated half-hourly consumption unavailable for meter %s; "
+                    "falling back to the newest entries: %s",
+                    meter.serial,
+                    err,
+                )
+
         # Try half-hourly data first.  Fetch a little over two full days (100
         # slots) so that yesterday's data is always complete even when today's
         # entries have started arriving and even on the autumn clocks-back day
@@ -446,7 +589,7 @@ class EonNextCoordinator(DataUpdateCoordinator):
                 page_size=100,
             )
             if result and "results" in result and len(result["results"]) > 0:
-                return result["results"], "half_hour"
+                return result["results"], "half_hour", None
         except EonNextAuthError:
             raise
         except Exception as err:  # pylint: disable=broad-except
@@ -466,7 +609,7 @@ class EonNextCoordinator(DataUpdateCoordinator):
                 page_size=7,
             )
             if result and "results" in result and len(result["results"]) > 0:
-                return result["results"], "day"
+                return result["results"], "day", None
         except EonNextAuthError:
             raise
         except Exception as err:  # pylint: disable=broad-except
@@ -476,7 +619,74 @@ class EonNextCoordinator(DataUpdateCoordinator):
                 err,
             )
 
-        return None, None
+        return None, None, None
+
+    async def _reconcile_statistics(
+        self,
+        meter,
+        consumption: list[dict[str, Any]],
+        meter_data: dict[str, Any] | None,
+        window_start: datetime,
+    ) -> None:
+        """Reconcile the meter's statistics and remember any late fill."""
+        try:
+            async with self.statistics_lock:
+                result = await async_reconcile_recent_statistics(
+                    self.hass,
+                    meter.serial,
+                    meter.type,
+                    consumption,
+                    meter_data,
+                    window_start=window_start,
+                )
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.debug(
+                "Statistics reconcile failed for meter %s: %s", meter.serial, err
+            )
+            return
+        if result.filled:
+            self.late_fill[meter.serial] = {
+                "timestamp": dt_util.utcnow().isoformat(),
+                "hours": result.filled,
+            }
+
+    @staticmethod
+    def _incomplete_days(
+        consumption: list[dict[str, Any]], window_start: datetime
+    ) -> list[str]:
+        """Past local days in the window with fewer half-hours than the day has.
+
+        Excludes today (still arriving).  A day stays listed until E.ON
+        returns all of it, which separates E.ON's gaps from the integration's.
+        Oldest first, as ISO dates.
+        """
+        starts: set[datetime] = set()
+        for entry in consumption:
+            interval_start = entry.get("interval_start")
+            if not interval_start or entry.get("consumption") is None:
+                continue
+            parsed = dt_util.parse_datetime(str(interval_start))
+            if parsed is None:
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            starts.add(dt_util.as_utc(parsed))
+
+        counts: dict[date, int] = {}
+        for start in starts:
+            local_day = dt_util.as_local(start).date()
+            counts[local_day] = counts.get(local_day, 0) + 1
+
+        today = dt_util.now().date()
+        # ``window_start`` is a local midnight (rounded up to the hour), so the
+        # first window day is the local day it falls on.
+        day = dt_util.as_local(window_start).date()
+        incomplete: list[str] = []
+        while day < today:
+            if counts.get(day, 0) < slots_in_local_day(day):
+                incomplete.append(day.isoformat())
+            day += timedelta(days=1)
+        return incomplete
 
     @staticmethod
     def _pence_to_pounds(value: Any) -> float | None:

@@ -23,6 +23,7 @@ from custom_components.eon_next.const import (
     CONF_BACKFILL_RUN_INTERVAL_MINUTES,
     CONF_GAS_CALORIFIC_VALUE,
     CONF_GAS_CONSUMPTION_IN_M3,
+    CONF_RECONCILE_DAYS,
     CONF_SHOW_CARD,
     CONF_SHOW_PANEL,
     DEFAULT_BACKFILL_CHUNK_DAYS,
@@ -34,6 +35,7 @@ from custom_components.eon_next.const import (
     DEFAULT_BACKFILL_RUN_INTERVAL_MINUTES,
     DEFAULT_GAS_CALORIFIC_VALUE,
     DEFAULT_GAS_CONSUMPTION_IN_M3,
+    DEFAULT_RECONCILE_DAYS,
     DEFAULT_SHOW_CARD,
     DEFAULT_SHOW_PANEL,
     DOMAIN,
@@ -87,6 +89,7 @@ async def test_options_flow_uses_defaults(
         == DEFAULT_BACKFILL_RUN_INTERVAL_MINUTES
     )
     assert defaults[CONF_BACKFILL_DELAY_SECONDS] == DEFAULT_BACKFILL_DELAY_SECONDS
+    assert defaults[CONF_RECONCILE_DAYS] == DEFAULT_RECONCILE_DAYS == 7
     assert defaults[CONF_GAS_CONSUMPTION_IN_M3] is DEFAULT_GAS_CONSUMPTION_IN_M3 is True
     assert defaults[CONF_GAS_CALORIFIC_VALUE] == DEFAULT_GAS_CALORIFIC_VALUE == 38.0
 
@@ -146,3 +149,28 @@ async def test_options_flow_rejects_implausible_calorific_value(
         await hass.config_entries.options.async_configure(
             result["flow_id"], user_input=user_input
         )
+
+
+@pytest.mark.parametrize(("value", "valid"), [(0, True), (31, True), (-1, False), (32, False)])
+async def test_options_flow_reconcile_days_range(
+    hass: HomeAssistant, enable_custom_integrations: None, value: int, valid: bool
+) -> None:
+    """Re-check recent days accepts 0 (off) to 31 and nothing else."""
+    del enable_custom_integrations
+    await _ensure_recorder(hass)
+    entry = MockConfigEntry(domain=DOMAIN, options={})
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    user_input = {**_schema_defaults(result), CONF_RECONCILE_DAYS: value}
+    if valid:
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input=user_input
+        )
+        assert result["type"] == "create_entry"
+        assert result["data"][CONF_RECONCILE_DAYS] == value
+    else:
+        with pytest.raises(Exception):  # vol.Invalid / InvalidData
+            await hass.config_entries.options.async_configure(
+                result["flow_id"], user_input=user_input
+            )

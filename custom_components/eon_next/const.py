@@ -1,7 +1,7 @@
 """Constants for the Eon Next integration."""
 
 DOMAIN = "eon_next"
-INTEGRATION_VERSION = "2.1.1"  # x-release-please-version
+INTEGRATION_VERSION = "2.2.0"  # x-release-please-version
 
 # Config entry schema version.  v1 stored email/password; v2 stores an API key.
 CONFIG_ENTRY_VERSION = 2
@@ -32,6 +32,13 @@ CONF_BACKFILL_REQUESTS_PER_RUN = "backfill_requests_per_run"
 CONF_BACKFILL_RUN_INTERVAL_MINUTES = "backfill_run_interval_minutes"
 CONF_BACKFILL_DELAY_SECONDS = "backfill_delay_seconds"
 CONF_BACKFILL_REBUILD_STATISTICS = "backfill_rebuild_statistics"
+
+# Late-data reconcile: each live update re-reads this many past days and fills
+# half-hours E.ON published late.  0 turns it off (newest-100 fetch, append-only).
+CONF_RECONCILE_DAYS = "reconcile_days"
+DEFAULT_RECONCILE_DAYS = 7
+MIN_RECONCILE_DAYS = 0
+MAX_RECONCILE_DAYS = 31
 
 # Gas units.  SMETS2 gas meters report consumption in m3 on the REST
 # consumption endpoint; SMETS1 meters report kWh.  There is no reliable

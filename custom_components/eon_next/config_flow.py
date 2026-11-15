@@ -34,6 +34,7 @@ from .const import (
     CONF_GAS_CALORIFIC_VALUE,
     CONF_GAS_CONSUMPTION_IN_M3,
     CONF_PASSWORD,
+    CONF_RECONCILE_DAYS,
     CONF_REFRESH_TOKEN,
     CONF_SHOW_CARD,
     CONF_SHOW_PANEL,
@@ -47,11 +48,14 @@ from .const import (
     DEFAULT_BACKFILL_RUN_INTERVAL_MINUTES,
     DEFAULT_GAS_CALORIFIC_VALUE,
     DEFAULT_GAS_CONSUMPTION_IN_M3,
+    DEFAULT_RECONCILE_DAYS,
     DEFAULT_SHOW_CARD,
     DEFAULT_SHOW_PANEL,
     DOMAIN,
     MAX_GAS_CALORIFIC_VALUE,
+    MAX_RECONCILE_DAYS,
     MIN_GAS_CALORIFIC_VALUE,
+    MIN_RECONCILE_DAYS,
 )
 from .eonnext import EonNext, EonNextApiError, EonNextAuthError
 from .redact import redact_secrets
@@ -358,6 +362,15 @@ class EonNextOptionsFlow(config_entries.OptionsFlow):
                             DEFAULT_BACKFILL_DELAY_SECONDS,
                         ),
                     ): vol.All(vol.Coerce(int), vol.Range(min=0, max=3600)),
+                    vol.Required(
+                        CONF_RECONCILE_DAYS,
+                        default=options.get(
+                            CONF_RECONCILE_DAYS, DEFAULT_RECONCILE_DAYS
+                        ),
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(min=MIN_RECONCILE_DAYS, max=MAX_RECONCILE_DAYS),
+                    ),
                     vol.Required(
                         CONF_GAS_CONSUMPTION_IN_M3,
                         default=options.get(
