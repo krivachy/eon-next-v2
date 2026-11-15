@@ -190,6 +190,22 @@ class HistoricalBackfillStatusSensor(CoordinatorEntity, SensorEntity):
         meters_progress = status.get("meters_progress", {})
         if meters_progress:
             attrs["meters_progress"] = meters_progress
+
+        # Late-data reconcile diagnostics, per meter.  A day stays in
+        # ``incomplete_days`` until E.ON returns all of it, so it shows
+        # whether a gap is E.ON's or the integration's.
+        attrs["reconcile_days"] = getattr(self.coordinator, "reconcile_days", 0)
+        data = getattr(self.coordinator, "data", None)
+        reconcile: dict[str, dict[str, Any]] = {}
+        if isinstance(data, dict):
+            for serial, meter_data in data.items():
+                if isinstance(meter_data, dict) and "incomplete_days" in meter_data:
+                    reconcile[serial] = {
+                        "incomplete_days": meter_data["incomplete_days"],
+                        "last_late_fill": meter_data.get("last_late_fill"),
+                    }
+        if reconcile:
+            attrs["reconcile"] = reconcile
         return attrs
 
 

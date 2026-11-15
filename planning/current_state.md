@@ -10,7 +10,7 @@ The integration currently provides cloud-polled monitoring for EON Next accounts
 - Platform support: `sensor`, `binary_sensor`, `event`
 - Frontend: sidebar panel + Lovelace card(s)
 - Services exposed: `add_cost_tracker`, `reset_cost_tracker`, `update_cost_tracker`
-- Options flow: panel visibility, card visibility, backfill configuration, gas units (consumption reported in m³, calorific value)
+- Options flow: panel visibility, card visibility, backfill configuration, gas units (consumption reported in m³, calorific value), late-data reconcile window (`reconcile_days`)
 - Default polling interval: 30 minutes
 - Auth: per-account API key (`sk_live_...`, see `API_KEY.md`) with refresh token persistence; a rejected refresh token falls back to the API key. Email/password login was removed in 2.0.0 (E.ON moved login to Auth0).
 
@@ -83,6 +83,7 @@ Gas consumption from the REST endpoint (m3 on SMETS2 meters) is converted to kWh
 - Cost data: GraphQL `consumptionDataByMpxn` for standing charge and total cost
 - Tariff data: GraphQL `getAccountAgreements` for active tariff agreements per meter point
 - EV schedules: SmartFlex planned dispatch query (`flexPlannedDispatches`)
+- Late-data reconcile: each live update re-reads the last `reconcile_days` (default 7) days with one dated, paged half-hourly request and splices missing/changed hours into the consumption and cost statistics (never deletes; shares a per-entry lock with the backfill); `incomplete_days` / `last_late_fill` diagnostics
 - Historical backfill: configurable, resumable, throttled statistics import (half-hourly with paging, spliced per hour; daily buckets only as a fallback)
 - External statistics import for Energy Dashboard: consumption (`eon_next:<fuel>_<serial>_consumption`, kWh) and cost (`eon_next:<fuel>_<serial>_cost`, GBP: per-half-hour unit rate plus the daily standing charge in the first local hour), live and backfilled
 - Resilience: reuses previous coordinator data on transient update failures

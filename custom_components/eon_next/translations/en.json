@@ -48,10 +48,12 @@
                     "backfill_requests_per_run": "Backfill requests per run",
                     "backfill_run_interval_minutes": "Minutes between backfill runs",
                     "backfill_delay_seconds": "Delay between backfill requests (seconds)",
+                    "reconcile_days": "Re-check recent days",
                     "gas_consumption_in_m3": "Gas consumption is reported in m³",
                     "gas_calorific_value": "Gas calorific value"
                 },
                 "data_description": {
+                    "reconcile_days": "Each update re-reads this many past days and fills any half-hours E.ON published late. 0 turns it off.",
                     "gas_consumption_in_m3": "On for SMETS2 gas meters (most smart meters), whose consumption E.ON reports in cubic metres; it is converted to kWh. Turn off for SMETS1 gas meters, which already report kWh.",
                     "gas_calorific_value": "Used to convert gas volume to kWh (kWh = m³ × 1.02264 × calorific value ÷ 3.6). Your gas bill shows the value for your area; the default is 38."
                 },

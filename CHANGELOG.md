@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 This project is a fork of [madmachinations/eon-next-v2](https://github.com/madmachinations/eon-next-v2), maintained by [@monsagri](https://github.com/monsagri).
 
+## [2.2.0](https://github.com/krivachy/eon-next-v2/compare/v2.1.1...v2.2.0) (2026-11-15)
+
+
+### Features
+
+* **statistics:** late‑arriving half‑hours are now filled automatically. If E.ON publishes a day's data late (for example a meter that misses its reads and then catches up), that day used to stay partial in the Energy Dashboard statistics for good. Each update now re‑reads the last 7 days with one dated, paged request instead of the newest 100 half‑hours, compares them with the stored hourly statistics and rewrites any hour that is missing or changed, for both the consumption and the cost statistic. Later cumulative sums are rebased so they stay monotonic, nothing is double counted, and nothing is rewritten when nothing changed. A stored hour that E.ON does not return is never deleted or zeroed. API requests per meter per update are unchanged (more only when the endpoint pages)
+* **options:** new option *Re‑check recent days* (`reconcile_days`, default 7, range 0‑31). 0 turns it off and restores the previous behaviour exactly: newest‑100 fetch and append‑only import
+* **diagnostics:** the *Historical Backfill Status* sensor gains a `reconcile` attribute with, for each meter, `incomplete_days` (past days in the window that have fewer half‑hours than the local day has, oldest first, until E.ON returns them) and `last_late_fill` (when the last late fill happened and how many hours it wrote)
+
+### Upgrade notes
+
+* **On by default.** After upgrading, partial days in the last 7 days fill in on the first update. Older gaps still need the historical backfill: raise *History lookback window* with *Clear and rebuild statistics* off
+* Hours rewritten by the late fill are priced with the **current tariff**, as the historical backfill already does. If your tariff changed inside the last 7 days, those days' cost statistic is re‑priced at today's rates
+
 ## [2.1.1](https://github.com/krivachy/eon-next-v2/compare/v2.1.0...v2.1.1) (2026-11-06)
 
 

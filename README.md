@@ -101,7 +101,18 @@ When SmartFlex devices are available: smart‑charging schedule status, next cha
 - Current‑price and consumption entities wire directly into Home Assistant's Energy Dashboard.
 - Each meter gets two external statistics: `eon_next:<fuel>_<serial>_consumption` (kWh) and `eon_next:<fuel>_<serial>_cost` (GBP). The cost statistic prices each half‑hour at its own unit rate (time‑of‑use aware) and adds the daily standing charge in the first hour of each local day. To show costs in £, in the Energy Dashboard settings pick the consumption statistic for the grid or gas source, then choose *Use an entity tracking the total costs* and pick the matching `… Cost` statistic. Home Assistant's currency must be GBP for it to be listed. Export meters have no cost statistic.
 - A slow, resumable **historical backfill** imports long‑term statistics (see below).
-- A diagnostic status sensor reports backfill progress.
+- **Late data** is filled in automatically (see [Late data](#late-data)).
+- A diagnostic status sensor reports backfill progress and any days E.ON has not fully published.
+
+#### Late data
+
+E.ON sometimes publishes a day's half‑hourly readings late, for example when a smart meter misses its reads and then catches up. Each update re‑reads the last *N* days (default 7) in a single dated request, compares every hour with the stored statistics, and fills or corrects any hour that is missing or different, for both the consumption and the cost statistic. No action is needed: a day that E.ON completes up to *N* days late is complete in both statistics within one update of E.ON having it.
+
+- **Option:** *Re‑check recent days* (`reconcile_days`, default `7`, range `0`‑`31`) under **Settings → Devices & Services → Eon Next → Configure**. `0` turns it off: each update then fetches the newest 100 half‑hours and only appends newer hours, as before `2.2.0`.
+- **Safe by design:** later cumulative sums are rebased so they stay monotonic, nothing is double counted, and when nothing changed nothing is rewritten. An hour that is stored but not returned by E.ON is never deleted or zeroed, and hours E.ON never returns are not invented.
+- **Tariff changes:** rewritten hours are priced with the current tariff, as the historical backfill does. If your tariff changed inside the window, those days' cost statistic is re‑priced at today's rates.
+- **`incomplete_days`:** the *Historical Backfill Status* sensor has a `reconcile` attribute with, per meter, `incomplete_days` (past days in the window with fewer half‑hours than the local day has: 48, or 46 / 50 when the clocks change; oldest first) and `last_late_fill` (timestamp and number of hours of the last late fill). A day stays listed until E.ON returns it, so you can tell whether a gap is E.ON's or the integration's.
+- Days older than the window still need the historical backfill (raise *History lookback window*, with *Clear and rebuild statistics* off).
 
 ### Reliability
 
@@ -197,6 +208,7 @@ The integration supports a slow, resumable historical backfill for Energy Dashbo
 - Backfill runs **alongside** live 30‑minute imports rather than suspending them: each historical chunk is spliced into the existing statistics and later cumulative sums are recomputed, so current‑day Energy Dashboard data keeps updating while history fills in.
 - History is fetched half‑hourly and written hour by hour, so a day the live import only partly covered is filled completely. Daily totals are used only for periods with no half‑hourly data.
 - The backfill also imports the cost statistic, priced with the meter's current tariff (periods before a tariff change use today's rates).
+- The backfill and the live [late‑data fill](#late-data) take turns writing statistics (they share one lock per account), so a backfill chunk and a live update never interleave.
 
 Conservative defaults:
 
@@ -210,6 +222,12 @@ Conservative defaults:
 | Delay between requests | `300` seconds |
 
 ## Upgrade notes
+
+### 2.2.0: late‑arriving data is filled automatically
+
+- **On by default.** Each update now re‑reads the last 7 days (*Re‑check recent days*, set to `0` to turn off). After upgrading, partial days in that window fill in on the first update, in both the consumption and the cost statistic. See [Late data](#late-data).
+- **Older gaps** still need the historical backfill: raise *History lookback window* with *Clear and rebuild statistics* off.
+- Rewritten hours are priced with the current tariff, as in the backfill.
 
 ### 2.1.1: half‑hourly backfill and cost statistics
 
